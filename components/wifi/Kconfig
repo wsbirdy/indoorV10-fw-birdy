@@ -1,0 +1,15 @@
+menu "WiFi station"
+
+    config WIFI_STA_SSID
+        string "SSID"
+        default "ag-diamond_5GHz"
+        help
+            Name of the access point the monitor associates with.
+
+    config WIFI_STA_PASSWORD
+        string "Password"
+        default "0505563014466"
+        help
+            WPA2 passphrase. Leave empty for an open network.
+
+endmenu

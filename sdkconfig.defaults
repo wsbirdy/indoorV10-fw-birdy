@@ -1,0 +1,39 @@
+# Project defaults. sdkconfig itself is generated and gitignored, so anything
+# that has to survive a fresh checkout belongs here.
+#
+# Set your SSID, password and backend under "WiFi station" and "Cloud
+# telemetry" in `idf.py menuconfig` -- credentials are deliberately not
+# committed here.
+
+CONFIG_IDF_TARGET="esp32c5"
+
+# The Wi-Fi stack, mbedTLS and esp_http_client together add roughly 400 KB of
+# code, which does not fit the 1 MB factory partition of the default table.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# TLS working-set tuning for the ESP32-C5's ~183 KB heap. A handshake against
+# a 4096-bit RSA server certificate briefly claims most of the largest free
+# contiguous block; a 4 KB record buffer is ample for bodies this small, and
+# the smaller Wi-Fi pools leave steady-state headroom for it.
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+
+# The PMS5003 sits on UART0's default pins (GPIO 11/12) at 9600 8N1, so the
+# console cannot also live there. It used to: uart_init_all() reconfigured
+# UART0 to 9600 behind the console's back, every ESP_LOG line then took ~85 ms
+# to clock out, and the ~4 s Wi-Fi init burst blocked app_main long enough to
+# starve IDLE0 and trip the task watchdog -- after which the panic handler's
+# own dump, printed with interrupts off over the same crippled port, tripped
+# the 300 ms interrupt watchdog on top of it.
+#
+# The USB Serial/JTAG peripheral has dedicated pins and shares nothing with
+# UART0, so the log path and the sensor stop fighting over one port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ESP_LOGD is compiled out entirely unless the maximum level allows it, which is
+# why cloud_client's existing debug line had never once printed. The default
+# level stays at INFO; wifi_sta and cloud raise their own tags to DEBUG at
+# runtime, so the extra detail is confined to those two rather than arriving
+# from every IDF component at once.
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

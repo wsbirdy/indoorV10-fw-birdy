@@ -1,0 +1,53 @@
+menu "Cloud telemetry"
+
+    config CLOUD_SCHEME
+        string "URL scheme"
+        default "https"
+        help
+            Use "http" to post to a plain-HTTP collector on the local network;
+            the TLS settings below are then unused.
+
+    config CLOUD_HOST
+        string "Backend host"
+        default "hw.airgradient.com"
+
+    config CLOUD_SERIAL
+        string "Serial number override"
+        default ""
+        help
+            12 hex characters identifying this device. Leave empty to use the
+            station MAC address, which is unique per board and stable across
+            reboots.
+
+    config CLOUD_POST_INTERVAL_S
+        int "Post interval (seconds)"
+        range 10 3600
+        default 60
+
+    config CLOUD_HTTP_TIMEOUT_MS
+        int "Request timeout (ms)"
+        range 1000 60000
+        default 15000
+
+    config CLOUD_TLS_PINNED_CA
+        bool "Pin a single root CA"
+        default y
+        help
+            Verify the server against components/cloud/server_ca.pem only,
+            instead of the ESP-IDF bundle of public roots. Required for
+            hw.airgradient.com, whose certificate chains to a private root.
+
+            Pinning means the device trusts exactly one issuer, but a CA
+            rotation then needs a firmware update. Turn this off to post to a
+            server with a certificate from a public CA.
+
+    config CLOUD_PAYLOAD_EXTRA_FIELDS
+        bool "Send fields outside the AirGradient contract"
+        default y
+        help
+            Adds pm04, typicalSize, pressure and altitude -- readings this
+            board produces that the AirGradient schema has no property for.
+            A backend that does not know them will usually ignore them; turn
+            this off for a body that is strictly contract-compatible.
+
+endmenu
