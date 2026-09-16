@@ -2,6 +2,7 @@
 #include "ws2812.h"
 #include "driver/rmt_tx.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_rom_sys.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -39,10 +40,42 @@ static uint8_t s_pixels[STRIP_BYTES];
 static uint8_t s_frame[STRIP_BYTES];
 static uint8_t s_brightness = WS2812_DEFAULT_BRIGHTNESS;
 
+/*
+ * The strip has more than one author. The reporting task paints the AQI colour
+ * every few seconds, and the touch task changes the brightness under a finger
+ * on the slider -- two tasks, one staging buffer and one RMT channel. Without
+ * this, a refresh could rewrite s_frame while the encoder was still shifting
+ * the previous one out of it.
+ *
+ * Held across the transmit and its wait, so a frame always goes out whole.
+ * NULL before ws2812_init(), which is the one moment nothing else can be
+ * calling in.
+ */
+static SemaphoreHandle_t s_lock;
+
+static void strip_lock(void)
+{
+    if (s_lock) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+    }
+}
+
+static void strip_unlock(void)
+{
+    if (s_lock) {
+        xSemaphoreGive(s_lock);
+    }
+}
+
 esp_err_t ws2812_init(void)
 {
     if (s_chan) {
         return ESP_OK; // already up
+    }
+
+    if (s_lock == NULL) {
+        s_lock = xSemaphoreCreateMutex();
+        ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_NO_MEM, TAG, "lock alloc failed");
     }
 
     const rmt_tx_channel_config_t chan_cfg = {
@@ -75,32 +108,37 @@ esp_err_t ws2812_set_pixel(uint16_t index, uint8_t r, uint8_t g, uint8_t b)
     ESP_RETURN_ON_FALSE(index < WS2812_LED_COUNT, ESP_ERR_INVALID_ARG, TAG,
                         "pixel %u past the end of the strip", index);
 
+    strip_lock();
     uint8_t *px = &s_pixels[index * BYTES_PER_LED];
     px[0] = g;
     px[1] = r;
     px[2] = b;
+    strip_unlock();
     return ESP_OK;
 }
 
 void ws2812_set_all(uint8_t r, uint8_t g, uint8_t b)
 {
+    strip_lock();
     for (uint16_t i = 0; i < WS2812_LED_COUNT; i++) {
         uint8_t *px = &s_pixels[i * BYTES_PER_LED];
         px[0] = g;
         px[1] = r;
         px[2] = b;
     }
+    strip_unlock();
 }
 
 void ws2812_set_brightness(uint8_t brightness)
 {
+    strip_lock();
     s_brightness = brightness;
+    strip_unlock();
 }
 
-esp_err_t ws2812_refresh(void)
+/** Caller holds the lock. */
+static esp_err_t refresh_locked(void)
 {
-    ESP_RETURN_ON_FALSE(s_chan, ESP_ERR_INVALID_STATE, TAG, "not initialized");
-
     for (size_t i = 0; i < STRIP_BYTES; i++) {
         s_frame[i] = (uint8_t)((s_pixels[i] * s_brightness) / 255);
     }
@@ -122,8 +160,23 @@ esp_err_t ws2812_refresh(void)
     return ESP_OK;
 }
 
+esp_err_t ws2812_refresh(void)
+{
+    ESP_RETURN_ON_FALSE(s_chan, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+
+    strip_lock();
+    const esp_err_t err = refresh_locked();
+    strip_unlock();
+    return err;
+}
+
 esp_err_t ws2812_clear(void)
 {
+    ESP_RETURN_ON_FALSE(s_chan, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+
+    strip_lock();
     memset(s_pixels, 0, sizeof(s_pixels));
-    return ws2812_refresh();
+    const esp_err_t err = refresh_locked();
+    strip_unlock();
+    return err;
 }

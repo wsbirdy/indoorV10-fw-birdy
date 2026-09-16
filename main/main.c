@@ -11,7 +11,7 @@
 
 #include "air_monitor.h"
 #include "aqi.h"
-#include "cap1203.h"
+#include "touch.h"
 #include "cloud.h"
 #include "co2.h"
 #include "pm.h"
@@ -49,9 +49,12 @@ typedef enum {
 } ui_prompt_t;
 
 /*
- * Everything the three pads can change. Owned by ui_task; report_task only
- * reads led_on, and a byte read racing a byte write costs at worst one frame
- * of the strip being a cycle late.
+ * Everything the buttons can change. Owned by ui_task; report_task only reads
+ * led_on, and a byte read racing a byte write costs at worst one frame of the
+ * strip being a cycle late.
+ *
+ * The LED bar's brightness is deliberately not in here -- the slider writes it
+ * from the touch task, so it lives on its own below.
  */
 static struct {
     display_screen_t screen;
@@ -112,6 +115,65 @@ static void apply_frontlight(void)
 
     ESP_LOGI(TAG, "frontlight %s (%.0f%% duty on gpio %d)",
              FRONTLIGHT_LEVELS[s_ui.frontlight].name, percent, PWM_GPIO);
+}
+
+
+/* ------------------------------------------------- LED bar brightness (slider) */
+
+/*
+ * The slider's range, expressed on the WS2812's 0..255 scale.
+ *
+ * The bottom is a floor, not off. Switching the ring off is the LED ring menu
+ * row's job, and a slider that could also do it would leave two controls
+ * disagreeing about the same state -- so the dimmest setting is dim, and off
+ * stays one press away.
+ *
+ * The top is half scale on purpose. These LEDs draw ~60 mA each at full, which
+ * is 660 mA for the eleven on this strip, and ws2812.h starts at 64 for that
+ * reason. 128 is twice that default and still well inside what the supply is
+ * asked for elsewhere. Raise it here if the board's supply says otherwise.
+ */
+#define LED_BRIGHTNESS_MIN      8
+#define LED_BRIGHTNESS_MAX      128
+
+/* Lands on scale 62, near ws2812.h's own default of 64, so a board that is
+ * never touched looks the way it always did. */
+#define LED_BRIGHTNESS_DEFAULT_PCT  45
+
+/*
+ * Written by the touch task from the slider callback and read by ui_task and
+ * the menu. A byte, so a read racing a write costs at worst a menu row showing
+ * the previous percentage for one frame.
+ */
+static volatile uint8_t s_led_brightness_pct = LED_BRIGHTNESS_DEFAULT_PCT;
+
+static uint8_t brightness_scale(uint8_t percent)
+{
+    if (percent > 100) {
+        percent = 100;
+    }
+    return (uint8_t)(LED_BRIGHTNESS_MIN +
+                     ((LED_BRIGHTNESS_MAX - LED_BRIGHTNESS_MIN) * percent + 50) / 100);
+}
+
+/*
+ * Runs on the touch task, once per slider movement past the driver's deadband.
+ *
+ * It repaints the strip itself rather than waking ui_task, because ui_task
+ * repaints the e-paper panel too: at ~1 s a refresh and a limited fast-refresh
+ * budget, a panel cannot be asked to follow a finger. The strip can -- staging
+ * is a memcpy and the shift-out is under a millisecond -- so brightness tracks
+ * the slider live and the panel hears about it once, on release, as
+ * TOUCH_EVENT_SLIDER.
+ *
+ * ws2812 takes its own lock, which is what makes this safe against report_task
+ * painting the AQI colour at the same moment.
+ */
+static void on_slider_moved(uint8_t percent)
+{
+    s_led_brightness_pct = percent;
+    ws2812_set_brightness(brightness_scale(percent));
+    ws2812_refresh();
 }
 
 
@@ -222,15 +284,29 @@ static void report_task(void *arg)
             ESP_LOGW(TAG, "SGP41    read failed");
         }
 
-        if (cap1203_pads_valid()) {
-            const uint8_t pads = cap1203_pads();
-            ESP_LOGI(TAG, "CAP1203  pads %c%c%c  (t=%lu ms)",
-                     (pads & CAP1203_PAD1) ? 'L' : '-',
-                     (pads & CAP1203_PAD2) ? 'E' : '-',
-                     (pads & CAP1203_PAD3) ? 'R' : '-',
-                     (unsigned long)cap1203_pads_updated_ms());
+        if (touch_pads_valid()) {
+            const uint8_t pads = touch_pads();
+
+            // Only the part that has a strip gets a column for it, so the line
+            // does not claim hardware this board is not carrying.
+            char slider[24] = "";
+            if (touch_has_slider()) {
+                const uint8_t position = touch_slider_percent();
+                if (position == TOUCH_SLIDER_RELEASED) {
+                    snprintf(slider, sizeof(slider), "  slider --");
+                } else {
+                    snprintf(slider, sizeof(slider), "  slider %u%%", position);
+                }
+            }
+
+            ESP_LOGI(TAG, "%s  pads %c%c%c%s  led bar %u%%  (t=%lu ms)", TOUCH_IC_NAME,
+                     (pads & TOUCH_PAD_LEFT)  ? 'L' : '-',
+                     (pads & TOUCH_PAD_ENTER) ? 'E' : '-',
+                     (pads & TOUCH_PAD_RIGHT) ? 'R' : '-',
+                     slider, s_led_brightness_pct,
+                     (unsigned long)touch_pads_updated_ms());
         } else {
-            ESP_LOGW(TAG, "CAP1203  read failed");
+            ESP_LOGW(TAG, "%s  read failed", TOUCH_IC_NAME);
         }
 
         if (dev.pm_valid && pm_has(&dev.pm, PM_FIELD_PM4_0)) {
@@ -429,11 +505,11 @@ static void update_wifi_prompt(void)
 }
 
 /** @return true when the press was consumed by the prompt. */
-static bool handle_prompt_button(cap1203_button_t button)
+static bool handle_prompt_button(touch_event_t event)
 {
     switch (s_ui.prompt) {
     case UI_PROMPT_ASK:
-        if (button == CAP1203_BUTTON_ENTER) {
+        if (event == TOUCH_EVENT_ENTER) {
             prompt_open_portal();
         } else {
             ESP_LOGI(TAG, "setup offer declined");
@@ -457,9 +533,12 @@ static bool handle_prompt_button(cap1203_button_t button)
 /* ------------------------------------------------------------------- menu */
 
 /*
- * Three pads, so the usual three-key idiom: left and right move, enter acts.
+ * Three buttons, so the usual three-key idiom: left and right move, enter acts.
  * On the dashboard that means walking the highlight along the readings; in the
  * menu it means walking the rows.
+ *
+ * The slider is not part of this. It is a direct control for one setting, not
+ * a fourth key, so it never moves a highlight or opens anything.
  */
 enum {
     MENU_LED,
@@ -513,9 +592,30 @@ static void build_about_text(void)
              app->project_name, serial, app->version, app->date, app->time, app->idf_ver);
 }
 
+/*
+ * "On  45%" rather than a row of its own: the percentage is not editable from
+ * the menu -- the slider owns it -- so it belongs beside the switch it
+ * qualifies rather than pretending to be another thing to press enter on. A
+ * board with no slider has no adjustable percentage, and shows none.
+ */
+static char s_led_row_value[16];
+
+static void fill_led_row_value(void)
+{
+    if (!s_ui.led_on) {
+        snprintf(s_led_row_value, sizeof(s_led_row_value), "Off");
+    } else if (touch_has_slider()) {
+        snprintf(s_led_row_value, sizeof(s_led_row_value), "On  %u%%", s_led_brightness_pct);
+    } else {
+        snprintf(s_led_row_value, sizeof(s_led_row_value), "On");
+    }
+}
+
 static void fill_menu(display_values_t *v)
 {
-    v->rows[MENU_LED]        = (display_row_t){ "LED ring",     s_ui.led_on ? "On" : "Off" };
+    fill_led_row_value();
+
+    v->rows[MENU_LED]        = (display_row_t){ "LED ring",     s_led_row_value };
     v->rows[MENU_FRONTLIGHT] = (display_row_t){ "Frontlight",
                                                 FRONTLIGHT_LEVELS[s_ui.frontlight].name };
     v->rows[MENU_UNITS]      = (display_row_t){ "Temperature",  s_ui.use_fahrenheit ? "F" : "C" };
@@ -582,18 +682,43 @@ static void menu_activate(void)
     }
 }
 
-static void handle_button(cap1203_button_t button)
+/*
+ * How long the panel acknowledges a slider gesture before going back to
+ * whatever the footer normally says. Three dashboard frames: long enough to
+ * read after the hand has moved away, short enough that it is gone by the time
+ * anyone looks again.
+ */
+#define SLIDER_SNACKBAR_MS  15000
+
+static char    s_slider_snackbar[32];
+static int64_t s_slider_snackbar_since_us;
+
+static void handle_event(touch_event_t event)
 {
-    // The offer owns the whole screen while it is up, so it owns the pads too.
-    if (handle_prompt_button(button)) {
+    if (event == TOUCH_EVENT_SLIDER) {
+        /*
+         * A finished slider gesture, not a key. It must not walk the highlight,
+         * open the menu or answer the Wi-Fi offer -- someone reaching for the
+         * brightness has not agreed to anything. The strip already followed the
+         * finger from the touch task; all that is left is to say so on the
+         * panel, once.
+         */
+        snprintf(s_slider_snackbar, sizeof(s_slider_snackbar),
+                 "LED bar %u%%", touch_slider_percent_last());
+        s_slider_snackbar_since_us = esp_timer_get_time();
+        return;
+    }
+
+    // The offer owns the whole screen while it is up, so it owns the buttons too.
+    if (handle_prompt_button(event)) {
         return;
     }
 
     switch (s_ui.screen) {
     case DISPLAY_SCREEN_HOME:
-        if (button == CAP1203_BUTTON_LEFT) {
+        if (event == TOUCH_EVENT_LEFT) {
             s_ui.metric = display_metric_next(s_ui.metric, -1);
-        } else if (button == CAP1203_BUTTON_RIGHT) {
+        } else if (event == TOUCH_EVENT_RIGHT) {
             s_ui.metric = display_metric_next(s_ui.metric, +1);
         } else {
             s_ui.screen = DISPLAY_SCREEN_MENU;
@@ -602,9 +727,9 @@ static void handle_button(cap1203_button_t button)
         break;
 
     case DISPLAY_SCREEN_MENU:
-        if (button == CAP1203_BUTTON_LEFT) {
+        if (event == TOUCH_EVENT_LEFT) {
             s_ui.menu_row = (uint8_t)((s_ui.menu_row + MENU_ROW_COUNT - 1) % MENU_ROW_COUNT);
-        } else if (button == CAP1203_BUTTON_RIGHT) {
+        } else if (event == TOUCH_EVENT_RIGHT) {
             s_ui.menu_row = (uint8_t)((s_ui.menu_row + 1) % MENU_ROW_COUNT);
         } else {
             menu_activate();
@@ -636,7 +761,16 @@ static void apply_ui(display_values_t *v)
     switch (s_ui.screen) {
     case DISPLAY_SCREEN_HOME:
         v->highlight = s_ui.metric;
-        if (!wifi_sta_is_online()) {
+        if (s_slider_snackbar_since_us != 0 &&
+            esp_timer_get_time() - s_slider_snackbar_since_us <
+                (int64_t)SLIDER_SNACKBAR_MS * 1000) {
+            /*
+             * Outranks the offline notice for its window. Someone just moved
+             * the slider and is looking at the panel for confirmation; the dead
+             * link was there before the gesture and will still be there after.
+             */
+            v->snackbar_text = s_slider_snackbar;
+        } else if (!wifi_sta_is_online()) {
             /*
              * The footer otherwise names the sensors that are not reporting;
              * the snackbar takes it over while offline, which is the right
@@ -666,11 +800,11 @@ static void ui_task(void *arg)
          * have. The boot splash therefore stays up until the first of the two
          * happens rather than being overwritten by an empty dashboard.
          */
-        cap1203_button_t button;
-        const bool pressed = cap1203_button_wait(&button, DISPLAY_PERIOD_MS);
+        touch_event_t event;
+        const bool pressed = touch_event_wait(&event, DISPLAY_PERIOD_MS);
 
         if (pressed) {
-            handle_button(button);
+            handle_event(event);
         }
 
         // Runs on every pass, press or tick, so the offer can appear, time out
@@ -722,14 +856,29 @@ void app_main(void)
 
     ESP_ERROR_CHECK(air_monitor_init());
 
-    // The pads are their own reader now: cap1203_read() clears the latched
-    // interrupt, so air_monitor must not poll them as well.
-    if (cap1203_buttons_start() != ESP_OK) {
-        ESP_LOGE(TAG, "touch buttons unavailable");
+    // The pads are their own reader: reading the status register clears the
+    // latched interrupt, so air_monitor must not poll them as well.
+    if (touch_start() != ESP_OK) {
+        ESP_LOGE(TAG, "%s touch panel unavailable", TOUCH_IC_NAME);
     }
 
     if (ws2812_init() != ESP_OK) {
         ESP_LOGE(TAG, "LED strip init failed");
+    } else {
+        /*
+         * Put the starting brightness on the strip before anything lights it,
+         * so the percentage the menu reports is the one the LEDs are actually
+         * running at rather than whatever ws2812.c defaulted to.
+         */
+        ws2812_set_brightness(brightness_scale(s_led_brightness_pct));
+
+        /*
+         * Only now: the callback repaints the strip, so it must not be
+         * reachable until there is a strip to repaint. A touch landing in the
+         * gap between touch_start() and here is lost, which costs one slider
+         * movement during boot and nothing else.
+         */
+        touch_slider_on_change(touch_has_slider() ? on_slider_moved : NULL);
     }
 
     /*
@@ -742,9 +891,15 @@ void app_main(void)
     display_values_t splash;
     display_values_reset(&splash);
     splash.screen = DISPLAY_SCREEN_INFO;
-    splash.info_text = "Starting up\n\n"
-                       "Waiting for the first sensor readings.\n\n"
-                       "Left / right pads move the highlight, the middle pad opens the menu.";
+    splash.info_text =
+        touch_has_slider()
+            ? "Starting up\n\n"
+              "Waiting for the first sensor readings.\n\n"
+              "Left / right pads move the highlight, the middle pad opens the menu.\n"
+              "The slider sets the LED bar brightness."
+            : "Starting up\n\n"
+              "Waiting for the first sensor readings.\n\n"
+              "Left / right pads move the highlight, the middle pad opens the menu.";
 
     if (display_init(NULL, &splash, true) != ESP_OK) {
         ESP_LOGE(TAG, "display init failed");

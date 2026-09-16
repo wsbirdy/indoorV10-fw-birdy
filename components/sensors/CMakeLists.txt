@@ -6,6 +6,7 @@ idf_component_register(
                 "sgp41.c"
                 "spl07.c"
                 "cap1203.c"
+                "cap1166.c"
                 "pm.c"
                 "pms5003.c"
                 "sps30.c"
