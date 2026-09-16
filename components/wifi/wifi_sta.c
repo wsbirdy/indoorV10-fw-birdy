@@ -159,7 +159,10 @@ static const char *disconnect_reason_name(uint8_t reason)
 {
     switch (reason) {
     case WIFI_REASON_AUTH_EXPIRE:       return "auth expired";
-    case WIFI_REASON_ASSOC_EXPIRE:      return "association expired";
+    // Reason code 4. Spelled WIFI_REASON_ASSOC_EXPIRE until it was deprecated
+    // in v5.5 and removed in v6.0; this name is valid in both.
+    case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY:
+                                        return "disassociated, AP saw us as idle";
     case WIFI_REASON_ASSOC_TOOMANY:     return "AP has too many stations";
     case WIFI_REASON_ASSOC_LEAVE:       return "we left";
     case WIFI_REASON_BEACON_TIMEOUT:    return "beacon timeout, AP out of range?";

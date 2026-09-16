@@ -1,0 +1,15 @@
+# cJSON was a core ESP-IDF component ("json") up to and including v5.x. v6.0
+# removed it from the tree and published it on the component registry instead,
+# so from v6.0 on it has to be pulled in as a managed dependency.
+#
+# The rule keeps that from affecting a v5.x build, where the core component is
+# still present and downloading a second copy of cJSON would put two versions
+# of the same symbols in front of the linker.
+#
+# See the component name switch in this component's CMakeLists.txt, which is
+# the other half of the same story.
+dependencies:
+  espressif/cjson:
+    version: "^1.7.18"
+    rules:
+      - if: "idf_version >= 6.0"

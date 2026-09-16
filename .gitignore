@@ -19,6 +19,8 @@
 # Build artifacts and directories
 **/build/
 build/
+# Alternate build dirs, e.g. idf.py -B build-v6 for a second ESP-IDF version
+build-*/
 *.o
 *.a
 *.out
@@ -38,6 +40,10 @@ sdkconfig
 **/components/.idf/
 # For modern ESP-IDF component manager
 managed_components/
+# Deliberately not committed: this project builds under two ESP-IDF majors and
+# the lock records which one resolved it, so a committed lock would flip on
+# every switch between them. The only managed dependency is espressif/cjson.
+dependencies.lock
 # If ESP-IDF tools are installed/referenced locally to the project
 .espressif/
 

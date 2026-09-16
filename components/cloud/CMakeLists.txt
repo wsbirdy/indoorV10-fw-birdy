@@ -6,6 +6,17 @@
 # server_ca.pem is embedded unconditionally so the build does not depend on a
 # Kconfig-selected source file; cloud_client.c only references the symbol when
 # CONFIG_CLOUD_TLS_PINNED_CA is set.
+
+# cJSON moved out of the ESP-IDF tree in v6.0: it was the core "json" component
+# through v5.x, and is the managed "espressif__cjson" from v6.0 on, pulled in by
+# idf_component.yml next to this file. The header and the API are the same
+# either way, so cloud_payload.c does not care -- only the dependency name does.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
+    set(cloud_json_component espressif__cjson)
+else()
+    set(cloud_json_component json)
+endif()
+
 idf_component_register(
     SRCS        "cloud.c"
                 "cloud_client.c"
@@ -16,6 +27,6 @@ idf_component_register(
                   esp_http_client
                   esp-tls
                   esp_timer
-                  json
+                  ${cloud_json_component}
     EMBED_TXTFILES "server_ca.pem"
 )
