@@ -80,6 +80,24 @@ extern "C" {
  */
 #define CAP1166_RESET_GPIO  (-1)
 
+/*
+ * ALERT# -- pin 11 on the 20-QFN, brought out as Touch_INT and pulled to +3.3V
+ * through R19.
+ *
+ * ##  SET THIS TO THE GPIO IT LANDS ON, OR LEAVE -1 TO POLL.  ##
+ *
+ * Active low and open drain, which is the part's reset default and what the
+ * board's pull-up expects. It asserts when a pad is touched or released and
+ * stays asserted until the interrupt is cleared, which cap1166_read() does on
+ * every pass.
+ *
+ * With this set the driver sleeps between touches instead of polling at a
+ * fixed rate, so a press is picked up as soon as the part reports it. At -1 it
+ * falls back to polling, which still works -- it just costs the poll interval
+ * in latency and a steady trickle of I2C traffic.
+ */
+#define CAP1166_ALERT_GPIO  (-1)
+
 #define CAP1166_PAD1        0x01
 #define CAP1166_PAD2        0x02
 #define CAP1166_PAD3        0x04

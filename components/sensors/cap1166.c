@@ -3,6 +3,7 @@
 #include "cap1166.h"
 #include "i2c.h"
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -18,6 +19,8 @@ static const char *TAG = "cap1166";
 #define REG_DELTA_COUNT_1       0x10    // ..0x15, one per pad, two's complement
 #define REG_SENSITIVITY         0x1F
 #define REG_SENSOR_ENABLE       0x21
+#define REG_AVG_AND_SAMPLING    0x24
+#define REG_INTERRUPT_ENABLE    0x27
 #define REG_REPEAT_RATE_ENABLE  0x28
 #define REG_MULTIPLE_TOUCH_CFG  0x2A
 #define REG_LED_LINKING         0x72
@@ -35,7 +38,7 @@ static const char *TAG = "cap1166";
 #define I2C_TIMEOUT_MS          100
 
 /* DELTA_SENSE 000b: 128x, the most sensitive setting (datasheet table 5.7). */
-#define SENSITIVITY_HIGHEST     0
+#define SENSITIVITY_HIGHEST     2
 
 /*
  * Multiple touch: blocking left on, but raised from one simultaneous touch to
@@ -97,6 +100,26 @@ static const char *TAG = "cap1166";
  * polarity -- so it is deliberately not blocked.
  */
 #define LED_POLARITY_NON_INVERTED   CAP1166_PADS_ALL
+
+/*
+ * Averaging and sampling: 4 samples per channel on a 35 ms cycle
+ * (AVG 010b, SAMP_TIME 10b = 1.28 ms unchanged, CYCLE_TIME 00b).
+ *
+ * This is the part's own decision rate, and it is the floor under every other
+ * latency here -- no amount of interrupt or polling work gets a touch reported
+ * sooner than the part decides there was one. The reset value of 39h is 8
+ * samples on a 70 ms cycle: 6 channels x 8 samples x 1.28 ms is 61 ms of
+ * sampling, so every touch and release waited up to 70 ms before anything
+ * downstream could hear about it, the linked LEDs included.
+ *
+ * At 4 samples the sweep is 6 x 4 x 1.28 = 30.7 ms, which still fits inside a
+ * 35 ms cycle -- the datasheet extends the cycle when it does not, so the two
+ * halves have to be chosen together. Halving the averaging is the cost: the
+ * delta counts get noisier, which matters most at the 128x gain this board
+ * runs. If touches start registering on their own, this is the first register
+ * to put back to 39h.
+ */
+#define AVG_AND_SAMPLING_FAST       0x28
 
 static i2c_master_dev_handle_t s_dev;
 
@@ -336,6 +359,14 @@ esp_err_t cap1166_init(void)
     ESP_RETURN_ON_ERROR(detach_on_error(reg_write(REG_MULTIPLE_TOUCH_CFG, MULTIPLE_TOUCH_MAX_3)),
                         TAG, "multiple touch config failed");
 
+    ESP_RETURN_ON_ERROR(detach_on_error(reg_write(REG_AVG_AND_SAMPLING, AVG_AND_SAMPLING_FAST)),
+                        TAG, "sampling config failed");
+
+    // Every pad raises ALERT#, which is what CAP1166_ALERT_GPIO waits on. Also
+    // the reset value, written so the two are not separated by a silent default.
+    ESP_RETURN_ON_ERROR(detach_on_error(reg_write(REG_INTERRUPT_ENABLE, CAP1166_PADS_ALL)),
+                        TAG, "interrupt enable failed");
+
     /*
      * No hardware auto-repeat. This driver polls the status register and finds
      * its own edges, so a repeat only adds interrupt assertions nobody reads,
@@ -569,7 +600,28 @@ void cap1166_slider_on_change(cap1166_slider_cb_t callback)
  * Polling task
  * ====================================================================== */
 
-#define POLL_PERIOD_MS      50      // fast enough that a tap never feels dropped
+/*
+ * Two cadences, because the panel asks for opposite things depending on
+ * whether a finger is on it.
+ *
+ * While something is touched the driver has to keep reading: the slider's
+ * position only exists as a fresh pair of delta counts, and ALERT# will not
+ * fire again until the finger comes off (repeat rate is disabled). 35 ms
+ * matches the part's own cycle, so it reads about as often as there is
+ * something new to read.
+ *
+ * While nothing is touched there is nothing to poll for. With ALERT# wired the
+ * wait is just a long backstop -- the interrupt does the waking, and this only
+ * covers an edge somehow missed or a part that has stopped talking. Without
+ * it, this interval *is* the response time, so it stays short.
+ */
+#define POLL_ACTIVE_MS      35
+#if CAP1166_ALERT_GPIO >= 0
+#define POLL_IDLE_MS        500
+#else
+#define POLL_IDLE_MS        50
+#endif
+
 #define EVENT_QUEUE_DEPTH   8
 
 /*
@@ -583,6 +635,86 @@ void cap1166_slider_on_change(cap1166_slider_cb_t callback)
 
 static QueueHandle_t s_events;
 static TaskHandle_t  s_task;
+
+#if CAP1166_ALERT_GPIO >= 0
+/*
+ * ALERT# went low: a pad was touched or released. Nothing is read here -- that
+ * needs I2C, which an ISR cannot do -- so this only wakes the task, which then
+ * reads the status register and clears the interrupt, releasing the line.
+ *
+ * The notification latches, so an edge that arrives while the task is mid-read
+ * is not lost: the next wait returns immediately instead of sleeping through
+ * the event that just happened.
+ */
+static void IRAM_ATTR alert_isr(void *arg)
+{
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    vTaskNotifyGiveFromISR((TaskHandle_t)arg, &higher_priority_task_woken);
+    portYIELD_FROM_ISR(higher_priority_task_woken);
+}
+
+static esp_err_t alert_attach(TaskHandle_t task)
+{
+    const gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << CAP1166_ALERT_GPIO,
+        .mode         = GPIO_MODE_INPUT,
+        // The board pulls this up through R19; the internal one keeps the line
+        // defined even on a board where that is missing or unpopulated.
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        // ALERT# is active low and open drain, so activity is a falling edge.
+        .intr_type    = GPIO_INTR_NEGEDGE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "alert gpio %d config failed",
+                        CAP1166_ALERT_GPIO);
+
+    // One service for the whole application. Another component getting there
+    // first is the expected case, not a failure.
+    const esp_err_t err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_RETURN_ON_ERROR(err, TAG, "gpio isr service install failed");
+    }
+
+    ESP_RETURN_ON_ERROR(gpio_isr_handler_add(CAP1166_ALERT_GPIO, alert_isr, task), TAG,
+                        "alert isr attach failed");
+
+    ESP_LOGI(TAG, "interrupt driven on gpio %d", CAP1166_ALERT_GPIO);
+    return ESP_OK;
+}
+#endif
+
+/**
+ * Is ALERT# still pulled down?
+ *
+ * Reading the status register and clearing the interrupt are two transfers,
+ * and an event landing between them is cleared along with the one being
+ * acknowledged. The line stays low in that case, but no new falling edge will
+ * ever arrive for it -- so the level, not the edge, is what says there is
+ * still something outstanding.
+ */
+static bool alert_asserted(void)
+{
+#if CAP1166_ALERT_GPIO >= 0
+    return gpio_get_level(CAP1166_ALERT_GPIO) == 0;
+#else
+    return false;
+#endif
+}
+
+/**
+ * Sleep until the part has something to say, or @p ticks elapse.
+ *
+ * Without ALERT# there is nothing to be woken by, so the timeout is the whole
+ * mechanism and this is an ordinary delay.
+ */
+static void wait_for_activity(TickType_t ticks)
+{
+#if CAP1166_ALERT_GPIO >= 0
+    ulTaskNotifyTake(pdTRUE, ticks);
+#else
+    vTaskDelay(ticks);
+#endif
+}
 
 static volatile uint8_t  s_pads;
 static volatile bool     s_pads_valid;
@@ -616,7 +748,6 @@ static void touch_task(void *arg)
 
     uint8_t  previous_buttons = 0;
     unsigned consecutive_failures = 0;
-    TickType_t last_wake_time = xTaskGetTickCount();
 #if CAP1166_DEBUG_DUMP
     uint32_t last_dump_ms = 0;
 #endif
@@ -685,8 +816,28 @@ static void touch_task(void *arg)
         }
 #endif
 
-        vTaskDelayUntil(&last_wake_time,
-                        pdMS_TO_TICKS(backing_off ? POLL_RETRY_MS : POLL_PERIOD_MS));
+        /*
+         * A finger on the panel is the one thing the part will not interrupt
+         * about again until it leaves, so that is when this keeps reading of
+         * its own accord. Idle, it waits to be told.
+         */
+        uint32_t wait_ms;
+        if (backing_off) {
+            wait_ms = POLL_RETRY_MS;
+        } else if (pads != 0 || alert_asserted()) {
+            /*
+             * A line still held down means an edge was swallowed by the
+             * read/clear window above. Coming back at the active cadence
+             * rather than skipping the wait is deliberate: a part that wedges
+             * with ALERT# low would otherwise turn this loop into a spin on
+             * the shared bus.
+             */
+            wait_ms = POLL_ACTIVE_MS;
+        } else {
+            wait_ms = POLL_IDLE_MS;
+        }
+
+        wait_for_activity(pdMS_TO_TICKS(wait_ms));
     }
 }
 
@@ -707,6 +858,17 @@ esp_err_t cap1166_start(void)
     // is a press the user has to repeat.
     ESP_RETURN_ON_FALSE(xTaskCreate(touch_task, "cap1166", 3072, NULL, 6, &s_task) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "task creation failed");
+
+#if CAP1166_ALERT_GPIO >= 0
+    /*
+     * After the task exists, because the handler needs something to notify.
+     * Non-fatal: the task is already running and its own timeout keeps the
+     * pads working, just at the polled cadence rather than on demand.
+     */
+    if (alert_attach(s_task) != ESP_OK) {
+        ESP_LOGW(TAG, "could not attach the interrupt, falling back to polling");
+    }
+#endif
 
     return ESP_OK;
 }
