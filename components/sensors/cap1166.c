@@ -21,6 +21,7 @@ static const char *TAG = "cap1166";
 #define REG_REPEAT_RATE_ENABLE  0x28
 #define REG_MULTIPLE_TOUCH_CFG  0x2A
 #define REG_LED_LINKING         0x72
+#define REG_LED_POLARITY        0x73
 #define REG_LED_OUTPUT_CONTROL  0x74
 #define REG_PRODUCT_ID          0xFD
 #define REG_MANUFACTURER_ID     0xFE
@@ -69,6 +70,33 @@ static const char *TAG = "cap1166";
  */
 #define RESET_ASSERT_TICKS  (pdMS_TO_TICKS(15) + 1)     // >= tRST_DLY
 #define RESET_COMMS_TICKS   (pdMS_TO_TICKS(20) + 1)     // >= tCOMM_DLY
+
+/*
+ * LED polarity: non-inverted on every channel, which is what makes the panel
+ * light up and go dark under a finger rather than the other way round.
+ *
+ * The part has no "invert the link" control, but it does not need one. Table
+ * 5.48 gives the appearance of a Direct-behaviour LED as a function of
+ * polarity and the actuating signal:
+ *
+ *   POL   actuated?   brightness
+ *   ----  ----------  -----------------------
+ *    0    no          min duty            = 0%     <- reset default
+ *    0    yes         max duty            = 100%
+ *    1    no          100 - min duty      = 100%   <- this board
+ *    1    yes         100 - max duty      = 0%
+ *
+ * with the duty cycles being the reset value of the LED Direct Duty Cycle
+ * register (93h = F0h: max 100%, min 0%). So flipping this one register turns
+ * "dark until touched" into "lit until touched", and the link still does all
+ * the work inside the part.
+ *
+ * Setting these bits also sets the matching LED Mirror Control bits, because
+ * Configuration 2's BLK_POL_MIR is left at its default. That pairing is the
+ * intended one -- mirroring is how the brightness interpretation follows the
+ * polarity -- so it is deliberately not blocked.
+ */
+#define LED_POLARITY_NON_INVERTED   CAP1166_PADS_ALL
 
 static i2c_master_dev_handle_t s_dev;
 
@@ -317,17 +345,24 @@ esp_err_t cap1166_init(void)
                         "repeat rate config failed");
 
     /*
-     * Every LED follows its own pad, decided inside the part.
-     *
-     * The rest of the LED block is left at its reset values, which already say
-     * what this board wants: open-drain outputs (71h) sinking through LEDs tied
-     * to VDD, inverted polarity (73h) so an actuated output pulls the pin low,
-     * Direct behaviour (81h/82h) so the LED is simply on for the duration of
-     * the touch rather than pulsing or breathing, and a 0-100% direct duty
-     * cycle (93h). Linking is the only bit that has to change.
+     * Every LED follows its own pad, decided inside the part: no I2C write per
+     * touch, no latency, and nothing to go wrong if a task stalls.
      */
     ESP_RETURN_ON_ERROR(detach_on_error(cap1166_led_link(CAP1166_PADS_ALL)), TAG,
                         "led linking failed");
+
+    // Lit while idle, dark under a finger. See LED_POLARITY_NON_INVERTED.
+    ESP_RETURN_ON_ERROR(detach_on_error(reg_write(REG_LED_POLARITY,
+                                                  LED_POLARITY_NON_INVERTED)),
+                        TAG, "led polarity failed");
+
+    /*
+     * The rest of the LED block stays at its reset values, which already say
+     * what this board wants: open-drain outputs (71h) sinking through the LEDs
+     * tied to +3.3V, Direct behaviour (81h/82h) so a pad simply switches its
+     * LED rather than pulsing or breathing it, and a 0-100% direct duty cycle
+     * (93h), which is what puts the two states at fully on and fully off.
+     */
 
     // Maximum gain. The pads are read through the enclosure wall, so the
     // default setting needs a firmer press than the board is meant to want.
@@ -335,7 +370,7 @@ esp_err_t cap1166_init(void)
                         "sensitivity failed");
 
     ESP_LOGI(TAG, "ready at 0x%02X (rev 0x%02X), CS1-3 buttons, CS4-6 slider, "
-                  "6 LEDs linked, DELTA_SENSE %d (128x)",
+                  "6 LEDs linked and lit until touched, DELTA_SENSE %d (128x)",
              CAP1166_I2C_ADDR, revision, SENSITIVITY_HIGHEST);
 
     return ESP_OK;
@@ -399,7 +434,14 @@ esp_err_t cap1166_led_link(uint8_t pad_mask)
 esp_err_t cap1166_led_set(uint8_t led_mask)
 {
     ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
-    return reg_write(REG_LED_OUTPUT_CONTROL, (uint8_t)(led_mask & CAP1166_PADS_ALL));
+
+    /*
+     * Inverted on the way to the register, so callers can go on thinking in
+     * terms of "lit". Every channel runs non-inverted here, and for those an
+     * actuated output is a dark LED (table 5.48) -- so a bit that means lit in
+     * this argument is a clear bit in the register.
+     */
+    return reg_write(REG_LED_OUTPUT_CONTROL, (uint8_t)(~led_mask & CAP1166_PADS_ALL));
 }
 
 

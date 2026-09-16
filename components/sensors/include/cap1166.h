@@ -23,18 +23,22 @@ extern "C" {
  *                 the order the position in cap1166_slider_percent() runs in.
  *   LED1..LED6    D4..D9, one green indicator per pad, each through its own
  *                 resistor to +3.3V. The part sinks the current, so an LED is
- *                 lit when its output is driven low -- which is what the reset
- *                 values of the LED block already do.
+ *                 lit when its output is driven low.
  *   ALERT#        pulled up to +3.3V and brought out as Touch_INT. Unused:
  *                 this driver polls. It is there if an interrupt-driven
  *                 version is ever wanted.
  *   RESET         brought out as Touch_RST, see CAP1166_RESET_GPIO below.
  *   ADDR_COMM     strapped to ground, see CAP1166_I2C_ADDR below.
  *
- * The LEDs are hardware-linked to their own sensor input, so LED n follows a
+ * The LEDs are hardware-linked to their own sensor input, so LED n answers a
  * touch on CS n with no firmware in the loop -- no I2C write, no latency, and
  * nothing to go wrong if a task stalls. cap1166_led_link() changes which of
  * them behave that way; cap1166_led_set() drives the ones that do not.
+ *
+ * The panel idles lit and goes dark under a finger, which is the opposite of
+ * the part's reset behaviour and costs one register to arrange -- see the LED
+ * polarity note in cap1166.c. It is still the link doing the work: the LED
+ * that goes out is chosen inside the part, not by this driver.
  */
 
 /*
@@ -140,9 +144,9 @@ esp_err_t cap1166_set_sensitivity(uint8_t delta_sense);
 /**
  * @brief Choose which LEDs the part drives from their own sensor input.
  *
- * A linked LED lights while its pad is touched and goes out when released,
+ * A linked LED goes out while its pad is touched and comes back when released,
  * entirely inside the chip. An unlinked one answers to cap1166_led_set()
- * instead. Defaults to all six linked.
+ * instead, and holds whatever that last set. Defaults to all six linked.
  *
  * @param pad_mask CAP1166_PAD* bits; LED n is linked when CS n's bit is set.
  */
@@ -152,10 +156,11 @@ esp_err_t cap1166_led_link(uint8_t pad_mask);
  * @brief Drive the LEDs that cap1166_led_link() left unlinked.
  *
  * Bits for linked LEDs are accepted but have no visible effect -- the link
- * wins. Lit means the pin is sinking current, which is on for this board's
- * wiring (LEDs to VDD through their resistors).
+ * wins.
  *
  * @param led_mask CAP1166_PAD* bits, reused as LED positions: PAD1 is LED1.
+ *                 A set bit is a lit LED, which is the opposite of the bit
+ *                 that reaches the register; see the definition.
  */
 esp_err_t cap1166_led_set(uint8_t led_mask);
 
