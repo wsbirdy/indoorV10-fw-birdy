@@ -12,15 +12,24 @@ extern "C" {
  * CAP1166 -- Microchip 6-channel capacitive touch sensor with 6 LED drivers.
  *
  * Same register family as the CAP1203 this board used to carry, widened from
- * three sensor inputs to six and with an LED driver behind each one. It sits
- * at the same default address, so the two parts are alternatives, never
- * neighbours: see touch.h, which picks one at compile time.
+ * three sensor inputs to six and with an LED driver behind each one. Which of
+ * the two a board carries is a compile-time choice -- see touch.h.
  *
- * Board wiring
- * ------------
- *   CS1 CS2 CS3   three discrete buttons: left, enter, right
- *   CS4 CS5 CS6   one vertical slider strip, CS6 at the top, CS4 at the bottom
- *   LED1..LED6    one indicator per pad, lit by the part itself (see below)
+ * Board wiring (U3 on the Capacitive Touch sheet, 20-QFN)
+ * -------------------------------------------------------
+ *   CS1 CS2 CS3   touch1..3_pad, three discrete buttons: left, enter, right
+ *   CS4 CS5 CS6   touch4..6_pad, one vertical slider strip. CS6 is the pad at
+ *                 the top of the strip and CS4 the one at the bottom, which is
+ *                 the order the position in cap1166_slider_percent() runs in.
+ *   LED1..LED6    D4..D9, one green indicator per pad, each through its own
+ *                 resistor to +3.3V. The part sinks the current, so an LED is
+ *                 lit when its output is driven low -- which is what the reset
+ *                 values of the LED block already do.
+ *   ALERT#        pulled up to +3.3V and brought out as Touch_INT. Unused:
+ *                 this driver polls. It is there if an interrupt-driven
+ *                 version is ever wanted.
+ *   RESET         brought out as Touch_RST, see CAP1166_RESET_GPIO below.
+ *   ADDR_COMM     strapped to ground, see CAP1166_I2C_ADDR below.
  *
  * The LEDs are hardware-linked to their own sensor input, so LED n follows a
  * touch on CS n with no firmware in the loop -- no I2C write, no latency, and
@@ -28,8 +37,44 @@ extern "C" {
  * them behave that way; cap1166_led_set() drives the ones that do not.
  */
 
-/** Address with ADDR_COMM tied to VDD, which is this board's fit (table 3.1). */
-#define CAP1166_I2C_ADDR    0x28
+/*
+ * I2C address, set in hardware by the resistor from ADDR_COMM (pin 12 on the
+ * 20-QFN) to ground. Datasheet table 3.1:
+ *
+ *      GND     SPI, 4-wire          -- not I2C at all
+ *      56k     SPI, 3-wire          -- not I2C at all
+ *      68k     BC-Link              -- not I2C at all
+ *      82k     0101_100  =  0x2C
+ *   -> 100k    0101_011  =  0x2B    <- this board
+ *      120k    0101_010  =  0x2A
+ *      150k    0101_001  =  0x29
+ *      VDD     0101_000  =  0x28
+ *
+ * Note the bottom three rows are not I2C: a board that grounds ADDR_COMM
+ * outright, or gets the resistor value badly wrong, puts the part on SPI and
+ * it will never answer here no matter what address is tried.
+ */
+#define CAP1166_I2C_ADDR    0x2B
+
+/*
+ * RESET -- pin 20 on the 20-QFN, pin 2 on the 24-SSOP.
+ *
+ * ##  SET THIS TO THE GPIO THAT DRIVES IT ON YOUR BOARD.  ##
+ *
+ * Active high, and unusually strong for a reset: while it is high the part is
+ * held in deep sleep with the communications block itself in reset, so it will
+ * not even acknowledge its address, and every register is forced back to its
+ * default. Driving it low is what starts the part.
+ *
+ * That is why leaving this unset is not a safe default when the line is wired
+ * to the MCU. An output that is never configured stays an input, the line
+ * floats, and a floating RESET that settles high holds the part asleep
+ * forever -- which looks exactly like a dead or mis-addressed part.
+ *
+ * -1 means the board ties RESET to ground itself, the datasheet's "if not
+ * used, connect to ground". Only leave it at -1 if that is actually true.
+ */
+#define CAP1166_RESET_GPIO  (-1)
 
 #define CAP1166_PAD1        0x01
 #define CAP1166_PAD2        0x02

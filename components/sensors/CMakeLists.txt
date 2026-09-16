@@ -16,5 +16,6 @@ idf_component_register(
                 "senseair_s12.c"
     INCLUDE_DIRS "include"
     PRIV_REQUIRES peripherals
+                  esp_driver_gpio   # cap1166.c drives the touch panel's RESET line
                   esp_timer
 )

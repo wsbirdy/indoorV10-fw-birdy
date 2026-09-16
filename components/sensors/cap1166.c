@@ -2,6 +2,7 @@
 
 #include "cap1166.h"
 #include "i2c.h"
+#include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -47,6 +48,27 @@ static const char *TAG = "cap1166";
  * pattern of a hand laid flat on the panel.
  */
 #define MULTIPLE_TOUCH_MAX_3    0x88
+
+/*
+ * RESET timings, from the datasheet's electrical characteristics:
+ *
+ *   tRST_DLY     10 ms min   how long RESET must be held high to register
+ *   tCOMM_DLY    15 ms max   release -> the part answers on the bus
+ *   tRESET      200 ms max   release -> the first conversion is ready
+ *
+ * The first two are waited out here; the third is not. Nothing needs a
+ * conversion during init -- identifying and configuring the part only needs
+ * the bus -- and holding app_main for another 200 ms to reach a reading that
+ * the poll task will pick up on its own is a boot delay bought for nothing.
+ * Until it lands the pads simply read untouched.
+ *
+ * The + 1 is not decoration. At CONFIG_FREERTOS_HZ 100 a tick is 10 ms, so
+ * pdMS_TO_TICKS(15) is one tick, and a one-tick delay expires at the next tick
+ * boundary -- which may be microseconds away. Two ticks is what makes the
+ * 10 ms minimum a minimum.
+ */
+#define RESET_ASSERT_TICKS  (pdMS_TO_TICKS(15) + 1)     // >= tRST_DLY
+#define RESET_COMMS_TICKS   (pdMS_TO_TICKS(20) + 1)     // >= tCOMM_DLY
 
 static i2c_master_dev_handle_t s_dev;
 
@@ -190,6 +212,47 @@ esp_err_t cap1166_dump_registers(void)
  * handle for a part that was never identified, which cap1166_init()'s
  * early-out would then read as "already initialized".
  */
+#if CAP1166_RESET_GPIO >= 0
+/*
+ * Drive the part through a clean reset before speaking to it.
+ *
+ * Worth doing even though power-on already resets it, because a firmware
+ * restart is not a power cycle: the MCU reboots and the CAP1166 keeps whatever
+ * it was last configured with, including a gain and a link mask from a build
+ * that may no longer match this one. Pulsing RESET means init always starts
+ * from the datasheet defaults it is written against.
+ *
+ * It also settles the line. Configuring the GPIO as an output and driving it
+ * low is what guarantees the part is not being held asleep by a pin nobody
+ * ever claimed.
+ */
+static esp_err_t reset_part(void)
+{
+    const gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << CAP1166_RESET_GPIO,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "reset gpio %d config failed",
+                        CAP1166_RESET_GPIO);
+
+    gpio_set_level(CAP1166_RESET_GPIO, 1);      // active high: held in deep sleep
+    vTaskDelay(RESET_ASSERT_TICKS);
+    gpio_set_level(CAP1166_RESET_GPIO, 0);      // released: the part starts
+    vTaskDelay(RESET_COMMS_TICKS);
+
+    return ESP_OK;
+}
+#else
+/* RESET is tied to ground on the board; there is nothing to drive. */
+static esp_err_t reset_part(void)
+{
+    return ESP_OK;
+}
+#endif
+
 static esp_err_t detach_on_error(esp_err_t err)
 {
     if (err != ESP_OK && s_dev) {
@@ -204,6 +267,10 @@ esp_err_t cap1166_init(void)
     if (s_dev) {
         return ESP_OK;
     }
+
+    // Before the first transfer: while RESET is asserted the communications
+    // block is in reset too, and the part will not even acknowledge its address.
+    ESP_RETURN_ON_ERROR(reset_part(), TAG, "reset failed");
 
     ESP_RETURN_ON_ERROR(i2c_add_device(CAP1166_I2C_ADDR, &s_dev), TAG, "attach failed");
 
@@ -224,7 +291,9 @@ esp_err_t cap1166_init(void)
             ESP_LOGE(TAG, "found a CAP1203 at 0x%02X, not a CAP1166 -- "
                           "set TOUCH_IC to TOUCH_IC_CAP1203 in touch.h", CAP1166_I2C_ADDR);
         } else {
-            ESP_LOGE(TAG, "unexpected ids 0x%02X/0x%02X", product_id, manufacturer_id);
+            ESP_LOGE(TAG, "unexpected ids 0x%02X/0x%02X at 0x%02X -- check the ADDR_COMM "
+                          "strapping resistor against the table in cap1166.h",
+                     product_id, manufacturer_id, CAP1166_I2C_ADDR);
         }
         return detach_on_error(ESP_ERR_NOT_FOUND);
     }

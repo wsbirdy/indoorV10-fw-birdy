@@ -12,13 +12,14 @@ extern "C" {
  * The board's touch panel, whichever part is fitted.
  *
  * Two generations of this board exist and they carry different Microchip
- * capacitive controllers. Both answer at 0x28, so only one can be on the bus:
- * this is a board fit, not something to detect at runtime.
+ * capacitive controllers. One part is fitted, not both, and which one is a
+ * property of the board rather than something worth probing for at runtime.
  *
- *   CAP1203   three pads, no LED drivers.
+ *   CAP1203   three pads, no LED drivers. Address 0x28.
  *             CS1/CS2/CS3 -> left, enter, right. No slider.
  *
- *   CAP1166   six pads, six LED drivers.
+ *   CAP1166   six pads, six LED drivers. Address set by a strapping resistor;
+ *             0x2B on this board. See cap1166.h for the decode table.
  *             CS1/CS2/CS3 -> left, enter, right, each with its own LED.
  *             CS4/CS5/CS6 -> one vertical slider, CS6 top and CS4 bottom,
  *             each with its own LED. Drives the WS2812 bar's brightness.
