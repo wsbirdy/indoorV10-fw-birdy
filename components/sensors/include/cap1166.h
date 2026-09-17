@@ -24,10 +24,10 @@ extern "C" {
  *   LED1..LED6    D4..D9, one green indicator per pad, each through its own
  *                 resistor to +3.3V. The part sinks the current, so an LED is
  *                 lit when its output is driven low.
- *   ALERT#        pulled up to +3.3V and brought out as Touch_INT. Unused:
- *                 this driver polls. It is there if an interrupt-driven
- *                 version is ever wanted.
- *   RESET         brought out as Touch_RST, see CAP1166_RESET_GPIO below.
+ *   ALERT#        pulled up to +3.3V and brought out as Touch_INT on GPIO 6.
+ *                 What wakes the driver when a pad changes, so it can sleep
+ *                 between touches instead of polling. See CAP1166_ALERT_GPIO.
+ *   RESET         brought out as Touch_RST on GPIO 2. See CAP1166_RESET_GPIO.
  *   ADDR_COMM     strapped to ground, see CAP1166_I2C_ADDR below.
  *
  * The LEDs are hardware-linked to their own sensor input, so LED n answers a
@@ -61,30 +61,27 @@ extern "C" {
 #define CAP1166_I2C_ADDR    0x2B
 
 /*
- * RESET -- pin 20 on the 20-QFN, pin 2 on the 24-SSOP.
- *
- * ##  SET THIS TO THE GPIO THAT DRIVES IT ON YOUR BOARD.  ##
+ * RESET -- pin 20 on the 20-QFN, brought out as Touch_RST and driven from
+ * GPIO 2.
  *
  * Active high, and unusually strong for a reset: while it is high the part is
  * held in deep sleep with the communications block itself in reset, so it will
  * not even acknowledge its address, and every register is forced back to its
  * default. Driving it low is what starts the part.
  *
- * That is why leaving this unset is not a safe default when the line is wired
- * to the MCU. An output that is never configured stays an input, the line
- * floats, and a floating RESET that settles high holds the part asleep
- * forever -- which looks exactly like a dead or mis-addressed part.
+ * That is why -1 is not a safe value here when the line is wired to the MCU.
+ * An output that is never configured stays an input, the line floats, and a
+ * floating RESET that settles high holds the part asleep forever -- which
+ * looks exactly like a dead or mis-addressed part.
  *
- * -1 means the board ties RESET to ground itself, the datasheet's "if not
- * used, connect to ground". Only leave it at -1 if that is actually true.
+ * Set it to -1 only on a board that ties RESET to ground itself, which is the
+ * datasheet's "if not used, connect to ground".
  */
-#define CAP1166_RESET_GPIO  (-1)
+#define CAP1166_RESET_GPIO  2
 
 /*
- * ALERT# -- pin 11 on the 20-QFN, brought out as Touch_INT and pulled to +3.3V
- * through R19.
- *
- * ##  SET THIS TO THE GPIO IT LANDS ON, OR LEAVE -1 TO POLL.  ##
+ * ALERT# -- pin 11 on the 20-QFN, brought out as Touch_INT on GPIO 6 and
+ * pulled to +3.3V through R19.
  *
  * Active low and open drain, which is the part's reset default and what the
  * board's pull-up expects. It asserts when a pad is touched or released and
@@ -96,7 +93,7 @@ extern "C" {
  * falls back to polling, which still works -- it just costs the poll interval
  * in latency and a steady trickle of I2C traffic.
  */
-#define CAP1166_ALERT_GPIO  (-1)
+#define CAP1166_ALERT_GPIO  6
 
 #define CAP1166_PAD1        0x01
 #define CAP1166_PAD2        0x02
