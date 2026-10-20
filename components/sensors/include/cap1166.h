@@ -24,10 +24,10 @@ extern "C" {
  *   LED1..LED6    D4..D9, one green indicator per pad, each through its own
  *                 resistor to +3.3V. The part sinks the current, so an LED is
  *                 lit when its output is driven low.
- *   ALERT#        pulled up to +3.3V and brought out as Touch_INT on GPIO 6.
+ *   ALERT#        pulled up to +3.3V and brought out as Touch_INT on GPIO 25.
  *                 What wakes the driver when a pad changes, so it can sleep
  *                 between touches instead of polling. See CAP1166_ALERT_GPIO.
- *   RESET         brought out as Touch_RST on GPIO 2. See CAP1166_RESET_GPIO.
+ *   RESET         brought out as Touch_RST on GPIO 26. See CAP1166_RESET_GPIO.
  *   ADDR_COMM     strapped to ground, see CAP1166_I2C_ADDR below.
  *
  * The LEDs are hardware-linked to their own sensor input, so LED n answers a
@@ -62,7 +62,7 @@ extern "C" {
 
 /*
  * RESET -- pin 20 on the 20-QFN, brought out as Touch_RST and driven from
- * GPIO 2.
+ * GPIO 26.
  *
  * Active high, and unusually strong for a reset: while it is high the part is
  * held in deep sleep with the communications block itself in reset, so it will
@@ -77,10 +77,10 @@ extern "C" {
  * Set it to -1 only on a board that ties RESET to ground itself, which is the
  * datasheet's "if not used, connect to ground".
  */
-#define CAP1166_RESET_GPIO  2
+#define CAP1166_RESET_GPIO  26
 
 /*
- * ALERT# -- pin 11 on the 20-QFN, brought out as Touch_INT on GPIO 6 and
+ * ALERT# -- pin 11 on the 20-QFN, brought out as Touch_INT on GPIO 25 and
  * pulled to +3.3V through R19.
  *
  * Active low and open drain, which is the part's reset default and what the
@@ -93,7 +93,7 @@ extern "C" {
  * falls back to polling, which still works -- it just costs the poll interval
  * in latency and a steady trickle of I2C traffic.
  */
-#define CAP1166_ALERT_GPIO  6
+#define CAP1166_ALERT_GPIO  25
 
 #define CAP1166_PAD1        0x01
 #define CAP1166_PAD2        0x02

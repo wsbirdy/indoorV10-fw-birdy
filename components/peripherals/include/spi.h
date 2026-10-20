@@ -11,7 +11,7 @@ extern "C" {
 #define SPI_SCLK_GPIO       0
 #define SPI_MOSI_GPIO       1
 #define SPI_MISO_GPIO       -1
-#define SPI_CS_GPIO         7
+#define SPI_CS_GPIO         2
 #define SPI_CLK_SPEED_HZ    (10 * 1000 * 1000)
 /* 4096 so a display driver can chunk on a whole 4 KB bounce buffer. */
 #define SPI_MAX_TRANSFER_SZ 4096

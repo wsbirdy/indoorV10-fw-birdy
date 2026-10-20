@@ -8,8 +8,8 @@ extern "C" {
 #endif
 
 #define I2C_PORT_NUM        I2C_NUM_0
-#define I2C_SDA_GPIO        25   
-#define I2C_SCL_GPIO        26
+#define I2C_SDA_GPIO        7
+#define I2C_SCL_GPIO        6
 #define I2C_CLK_SPEED_HZ    400000
 
 /**
