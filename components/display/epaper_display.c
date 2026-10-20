@@ -274,6 +274,26 @@ static void draw_readings(const display_values_t *v)
                      v->highlight == DISPLAY_METRIC_ALTITUDE, "%.0f m", v->altitude_m);
 }
 
+/** First menu row's text baseline-top, just under the title strip. */
+#define MENU_TOP_Y          17
+/** Rows that fit between the title strip and the bottom edge. */
+#define MENU_VISIBLE_ROWS   ((GFX_H - MENU_TOP_Y + 3) / ROW_PITCH)
+
+/**
+ * @brief A 3-pixel-tall triangle in the menu's left gutter, pointing up or
+ *        down, beside the text row whose top is @p row_y.
+ *
+ * Drawn in the row's own foreground, so it stays visible on the cursor band.
+ */
+static void draw_scroll_marker(int row_y, bool up, bool on_selected)
+{
+    const bool black = !on_selected;
+    for (int i = 0; i < 3; i++) {
+        const int w = up ? (1 + 2 * i) : (5 - 2 * i);
+        gfx_hline(s_render_buf, MARGIN_X + 2 - w / 2, row_y + 2 + i, w, black);
+    }
+}
+
 /**
  * @brief Full-canvas list. The selected row is inverted edge to edge, so it
  *        reads as the cursor without needing a marker glyph the 5x7 font
@@ -285,8 +305,20 @@ static void draw_menu(const display_values_t *v)
     gfx_text(s_render_buf, MARGIN_X + 2, 3, v->menu_title ? v->menu_title : "MENU", 1, false);
     gfx_text_right(s_render_buf, GFX_W - MARGIN_X - 2, 3, "L/R move   ENTER select", 1, false);
 
-    int y = 17;
-    for (uint8_t i = 0; i < v->row_count && i < DISPLAY_MAX_ROWS; i++) {
+    const uint8_t count = (v->row_count < DISPLAY_MAX_ROWS) ? v->row_count : DISPLAY_MAX_ROWS;
+
+    /*
+     * Scroll only as far as the cursor needs: the window starts at the top and
+     * moves down just enough to keep the selected row on its last line. The
+     * walk wraps from the last row to the first, which snaps the window back.
+     */
+    uint8_t first = 0;
+    if (v->selected_row >= MENU_VISIBLE_ROWS) {
+        first = (uint8_t)(v->selected_row - MENU_VISIBLE_ROWS + 1);
+    }
+
+    int y = MENU_TOP_Y;
+    for (uint8_t i = first; i < count && i < first + MENU_VISIBLE_ROWS; i++) {
         const bool selected = (i == v->selected_row);
 
         if (selected) {
@@ -299,6 +331,17 @@ static void draw_menu(const display_values_t *v)
         }
 
         y += ROW_PITCH;
+    }
+
+    // Small markers in the left gutter say there is more above or below, so
+    // rows scrolled out of view do not read as rows that do not exist.
+    if (first > 0) {
+        draw_scroll_marker(MENU_TOP_Y, true, v->selected_row == first);
+    }
+    if (first + MENU_VISIBLE_ROWS < count) {
+        const int last_y = MENU_TOP_Y + (MENU_VISIBLE_ROWS - 1) * ROW_PITCH;
+        draw_scroll_marker(last_y, false,
+                           v->selected_row == first + MENU_VISIBLE_ROWS - 1);
     }
 }
 
