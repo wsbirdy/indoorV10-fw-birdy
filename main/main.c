@@ -165,9 +165,9 @@ static void apply_pad_led_timeout(void)
 #define LED_BRIGHTNESS_MIN      8
 #define LED_BRIGHTNESS_MAX      128
 
-/* Lands on scale 62, near ws2812.h's own default of 64, so a board that is
- * never touched looks the way it always did. */
-#define LED_BRIGHTNESS_DEFAULT_PCT  45
+/* Boots at the top of the slider's range, LED_BRIGHTNESS_MAX on the strip's
+ * scale. The slider only ever comes down from here. */
+#define LED_BRIGHTNESS_DEFAULT_PCT  100
 
 /*
  * Written by the touch task from the slider callback and read by ui_task and
