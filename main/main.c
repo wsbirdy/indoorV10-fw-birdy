@@ -1,5 +1,9 @@
+#include <stdio.h>
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -65,6 +69,8 @@ static struct {
     uint8_t          frontlight;    ///< index into FRONTLIGHT_LEVELS
     ui_prompt_t      prompt;
     int64_t          prompt_since_us;
+    bool             co2_page;      ///< the INFO screen shows the CO2 page, not About
+    bool             co2_armed;     ///< one more middle press starts a calibration
 } s_ui = {
     .screen = DISPLAY_SCREEN_HOME,
     .metric = DISPLAY_METRIC_PM25,
@@ -530,6 +536,192 @@ static bool handle_prompt_button(touch_event_t event)
 }
 
 
+/* --------------------------------------------------------------- CO2 page */
+
+/*
+ * Status of the CO2 module and a fresh-air calibration, reached from the menu.
+ *
+ * Every Modbus exchange runs on a worker of its own: a calibration waits out a
+ * whole measurement period, and ui_task must keep answering the pads and
+ * painting "Calibrating" while it does. The worker publishes text under a lock
+ * and ui_task picks it up on its next pass.
+ *
+ * Fresh air is taken as the module's ABC target when it has one -- the value
+ * its own background calibration and ABC aim for -- and as 400 ppm otherwise.
+ */
+#define CO2_FRESH_AIR_PPM   400
+
+#define CO2_JOB_REFRESH     (1u << 0)
+#define CO2_JOB_CALIBRATE   (1u << 1)
+
+static TaskHandle_t      s_co2_worker;
+static SemaphoreHandle_t s_co2_lock;
+static char              s_co2_status[160];     ///< worker-owned, under s_co2_lock
+static char              s_co2_result[48];      ///< worker-owned, under s_co2_lock
+static volatile bool     s_co2_busy;            ///< a calibration is in flight
+static char              s_co2_page_text[288];  ///< ui_task-owned
+
+static void co2_publish(const char *status, const char *result)
+{
+    xSemaphoreTake(s_co2_lock, portMAX_DELAY);
+    if (status) {
+        snprintf(s_co2_status, sizeof(s_co2_status), "%s", status);
+    }
+    if (result) {
+        snprintf(s_co2_result, sizeof(s_co2_result), "%s", result);
+    }
+    xSemaphoreGive(s_co2_lock);
+}
+
+static void co2_refresh_status(void)
+{
+    char text[sizeof(s_co2_status)];
+    co2_info_t info;
+
+    if (co2_active_part() == CO2_PART_NONE) {
+        snprintf(text, sizeof(text), "No CO2 module answered at boot.");
+    } else if (co2_read_info(&info) != ESP_OK) {
+        snprintf(text, sizeof(text), "%s\nnot answering", co2_active_name());
+    } else {
+        char status[48];
+        co2_status_text(info.error_status, status, sizeof(status));
+
+        char abc[48];
+        if (info.abc_enabled) {
+            snprintf(abc, sizeof(abc), "ABC on, %u h to %u ppm (%u h in)",
+                     info.abc_period_h, info.abc_target_ppm, info.abc_time_h);
+        } else {
+            snprintf(abc, sizeof(abc), "ABC off, target %u ppm", info.abc_target_ppm);
+        }
+
+        snprintf(text, sizeof(text), "%s  fw %u.%u\nStatus: %s\n%s",
+                 co2_active_name(), info.fw_rev >> 8, info.fw_rev & 0xFF, status, abc);
+    }
+    co2_publish(text, NULL);
+}
+
+static void co2_run_calibration(void)
+{
+    co2_cal_t kind   = CO2_CAL_TARGET;
+    uint16_t  target = CO2_FRESH_AIR_PPM;
+
+    co2_info_t info;
+    if (co2_read_info(&info) == ESP_OK && info.abc_target_ppm != 0) {
+        kind   = CO2_CAL_BACKGROUND;
+        target = info.abc_target_ppm;
+    }
+
+    char result[sizeof(s_co2_result)];
+    snprintf(result, sizeof(result), "Calibrating to %u ppm...", target);
+    co2_publish(NULL, result);
+
+    const esp_err_t err = co2_calibrate(kind, target);
+    if (err == ESP_OK) {
+        snprintf(result, sizeof(result), "Calibrated to %u ppm", target);
+    } else {
+        snprintf(result, sizeof(result), "Calibration failed: %s", esp_err_to_name(err));
+    }
+    co2_publish(NULL, result);
+    ESP_LOGI(TAG, "CO2: %s", result);
+}
+
+static void co2_worker_task(void *arg)
+{
+    while (1) {
+        uint32_t jobs = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &jobs, portMAX_DELAY);
+
+        if (jobs & CO2_JOB_CALIBRATE) {
+            s_co2_busy = true;
+            co2_run_calibration();
+            s_co2_busy = false;
+        }
+        // A calibration changes the status too, so it always ends in a refresh.
+        co2_refresh_status();
+    }
+}
+
+static void co2_page_start(void)
+{
+    s_co2_lock = xSemaphoreCreateMutex();
+    if (s_co2_lock == NULL ||
+        xTaskCreate(co2_worker_task, "co2_ui", 4096, NULL, 2, &s_co2_worker) != pdPASS) {
+        ESP_LOGE(TAG, "CO2 page worker not started");
+        s_co2_worker = NULL;
+        return;
+    }
+    snprintf(s_co2_status, sizeof(s_co2_status), "Reading %s...", co2_active_name());
+}
+
+static void co2_job(uint32_t job)
+{
+    if (s_co2_worker) {
+        xTaskNotify(s_co2_worker, job, eSetBits);
+    }
+}
+
+static void co2_page_open(void)
+{
+    s_ui.screen    = DISPLAY_SCREEN_INFO;
+    s_ui.co2_page  = true;
+    s_ui.co2_armed = false;
+    co2_job(CO2_JOB_REFRESH);
+}
+
+/*
+ * Calibrating takes two middle presses: it rewrites the module's baseline, and
+ * a single brush of the pad indoors would leave every later reading low by
+ * however much the room was above fresh air.
+ */
+static void co2_page_button(touch_event_t event)
+{
+    if (event == TOUCH_EVENT_ENTER) {
+        if (s_co2_busy || co2_active_part() == CO2_PART_NONE) {
+            return;
+        }
+        if (!s_ui.co2_armed) {
+            s_ui.co2_armed = true;
+        } else {
+            s_ui.co2_armed = false;
+            s_co2_busy = true;      // so the very next frame already says so
+            co2_job(CO2_JOB_CALIBRATE);
+        }
+    } else if (s_ui.co2_armed) {
+        s_ui.co2_armed = false;     // a side pad cancels before it leaves
+    } else {
+        // Leaving does not stop a calibration; the menu row still shows it.
+        s_ui.co2_page = false;
+        s_ui.screen = DISPLAY_SCREEN_MENU;
+    }
+}
+
+static const char *co2_page_text(void)
+{
+    char status[sizeof(s_co2_status)];
+    char result[sizeof(s_co2_result)];
+
+    xSemaphoreTake(s_co2_lock, portMAX_DELAY);
+    memcpy(status, s_co2_status, sizeof(status));
+    memcpy(result, s_co2_result, sizeof(result));
+    xSemaphoreGive(s_co2_lock);
+
+    const char *hint;
+    if (s_co2_busy) {
+        hint = "Keep it in fresh air until done.";
+    } else if (s_ui.co2_armed) {
+        hint = "Been outdoors 5+ min? Middle again: calibrate. Side: cancel.";
+    } else if (co2_active_part() == CO2_PART_NONE) {
+        hint = "Side pad: back.";
+    } else {
+        hint = "Middle: fresh-air calibration. Side: back.";
+    }
+
+    snprintf(s_co2_page_text, sizeof(s_co2_page_text), "%s\n%s%s%s",
+             status, result, result[0] ? "\n" : "", hint);
+    return s_co2_page_text;
+}
+
+
 /* ------------------------------------------------------------------- menu */
 
 /*
@@ -547,6 +739,7 @@ enum {
     MENU_HIGHLIGHT,
     MENU_UPLOAD,
     MENU_REFRESH,
+    MENU_CO2,
     MENU_ABOUT,
     MENU_BACK,
     MENU_ROW_COUNT,
@@ -626,6 +819,8 @@ static void fill_menu(display_values_t *v)
                                                     ? (wifi_sta_is_online() ? "On" : "No link")
                                                     : "Off" };
     v->rows[MENU_REFRESH]    = (display_row_t){ "Full refresh", NULL };
+    v->rows[MENU_CO2]        = (display_row_t){ "CO2 sensor",
+                                                s_co2_busy ? "Calibrating" : NULL };
     v->rows[MENU_ABOUT]      = (display_row_t){ "About",        NULL };
     v->rows[MENU_BACK]       = (display_row_t){ "Back",         NULL };
 
@@ -671,8 +866,13 @@ static void menu_activate(void)
         s_ui.screen = DISPLAY_SCREEN_HOME;
         break;
 
+    case MENU_CO2:
+        co2_page_open();
+        break;
+
     case MENU_ABOUT:
         s_ui.screen = DISPLAY_SCREEN_INFO;
+        s_ui.co2_page = false;
         break;
 
     case MENU_BACK:
@@ -738,7 +938,11 @@ static void handle_event(touch_event_t event)
 
     case DISPLAY_SCREEN_INFO:
     default:
-        s_ui.screen = DISPLAY_SCREEN_MENU;   // About is read-only: any pad leaves
+        if (s_ui.co2_page) {
+            co2_page_button(event);
+        } else {
+            s_ui.screen = DISPLAY_SCREEN_MENU;   // About is read-only: any pad leaves
+        }
         break;
     }
 }
@@ -786,7 +990,7 @@ static void apply_ui(display_values_t *v)
         break;
     case DISPLAY_SCREEN_INFO:
     default:
-        v->info_text = s_about_text;
+        v->info_text = s_ui.co2_page ? co2_page_text() : s_about_text;
         break;
     }
 }
@@ -810,6 +1014,11 @@ static void ui_task(void *arg)
         // Runs on every pass, press or tick, so the offer can appear, time out
         // and clear itself without anybody touching the panel.
         update_wifi_prompt();
+
+        // Keeps the CO2 page live; a calibration refreshes it when it ends.
+        if (s_ui.screen == DISPLAY_SCREEN_INFO && s_ui.co2_page && !s_co2_busy) {
+            co2_job(CO2_JOB_REFRESH);
+        }
 
         air_monitor_device dev;
         air_monitor_get(&dev);
@@ -939,6 +1148,7 @@ void app_main(void)
     // ui_task exists to render the page.
     build_about_text();
 
+    co2_page_start();
     xTaskCreate(report_task, "report", 4096, NULL, 3, NULL);
     xTaskCreate(ui_task, "ui", 4096, NULL, 2, NULL);
 
