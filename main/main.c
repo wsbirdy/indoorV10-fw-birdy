@@ -860,6 +860,14 @@ void app_main(void)
     // latched interrupt, so air_monitor must not poll them as well.
     if (touch_start() != ESP_OK) {
         ESP_LOGE(TAG, "%s touch panel unavailable", TOUCH_IC_NAME);
+        /*
+         * Treated as a sign the front board is not answering, display
+         * included. epaper's busy wait has no timeout, so a BUSY line that
+         * never drops would otherwise hold app_main in display_init() forever,
+         * and nothing after it -- sensors, wifi, the UI -- would ever start.
+         * Must be set before display_init().
+         */
+        epaper_set_busy_bypass(true);
     }
 
     if (ws2812_init() != ESP_OK) {

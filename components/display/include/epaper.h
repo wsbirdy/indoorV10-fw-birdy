@@ -86,6 +86,18 @@ esp_err_t epaper_pins_init(void);
 esp_err_t epaper_init(void);
 
 /**
+ * @brief Stop waiting on the BUSY pin.
+ *
+ * With @p bypass set, every wait for BUSY to drop returns at once, so a panel
+ * whose BUSY line never comes down cannot hold the caller forever. Commands are
+ * then sent without waiting for the controller, so a panel that *is* there may
+ * draw garbage; this is a bring-up escape hatch, not a mode to run in.
+ *
+ * Call before epaper_init() / display_init() for it to cover the reset wait.
+ */
+void epaper_set_busy_bypass(bool bypass);
+
+/**
  * @brief Push a full framebuffer and run a full refresh. Equivalent to
  *        epaper_display_mode(fb, EPAPER_REFRESH_FULL).
  *

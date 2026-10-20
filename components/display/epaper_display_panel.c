@@ -47,6 +47,7 @@ static spi_device_handle_t s_spi;
 static uint8_t *s_tx_bounce;
 static bool s_inited;
 static uint8_t s_since_full;    // fast/partial refreshes since the last full one
+static bool s_busy_bypass;      // see epaper_set_busy_bypass()
 
 /* --- Low-level GPIO helpers (go_display.cpp: set_cs / set_dc / set_rst) --- */
 
@@ -65,6 +66,9 @@ static void delay_ms(uint32_t ms)
 /* BUSY=1 means controller processing; BUSY=0 means ready. */
 static void wait_busy_low(void)
 {
+    if (s_busy_bypass) {
+        return;
+    }
     while (gpio_get_level(EPD_BUSY_GPIO) != 0) {
         delay_ms(BUSY_POLL_MS);
     }
@@ -515,6 +519,14 @@ esp_err_t epaper_init(void)
     wait_busy_low();
 
     return ESP_OK;
+}
+
+void epaper_set_busy_bypass(bool bypass)
+{
+    s_busy_bypass = bypass;
+    if (bypass) {
+        ESP_LOGW(TAG, "BUSY (gpio %d) ignored: commands go out without waiting", EPD_BUSY_GPIO);
+    }
 }
 
 /*
