@@ -89,8 +89,13 @@ typedef enum {
  */
 display_metric_t display_metric_next(display_metric_t from, int delta);
 
-/** @brief Longest menu the renderer will draw. */
-#define DISPLAY_MAX_ROWS 8
+/**
+ * @brief Longest menu the renderer will draw.
+ *
+ * More than fit on the panel at once: the list scrolls to keep the selected
+ * row in view.
+ */
+#define DISPLAY_MAX_ROWS 12
 
 /**
  * @brief One menu line: a name on the left, its current setting on the right.
