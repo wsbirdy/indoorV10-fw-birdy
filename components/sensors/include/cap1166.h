@@ -185,6 +185,22 @@ esp_err_t cap1166_led_link(uint8_t pad_mask);
 esp_err_t cap1166_led_set(uint8_t led_mask);
 
 /**
+ * @brief Put the LEDs out after a stretch with no touch.
+ *
+ * Once @p timeout_ms passes with every pad untouched, all six LEDs go dark and
+ * stop following their pads. The next touch on any pad brings them back, and
+ * is used up doing so: it posts no event and moves no slider, so a tap on a
+ * dark panel only wakes it. The clock restarts on every touch and whenever
+ * this is called.
+ *
+ * Handled by the task cap1166_start() runs; safe to call from any task, before
+ * or after it starts. Lands up to half a second after the deadline.
+ *
+ * @param timeout_ms idle time before the LEDs go dark; 0 keeps them lit.
+ */
+void cap1166_led_idle_timeout(uint32_t timeout_ms);
+
+/**
  * @brief Log every readable register once, by name, on the "cap1166.dbg" tag.
  *
  * A development aid for judging how the pads behave in a given enclosure.

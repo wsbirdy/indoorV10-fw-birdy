@@ -124,6 +124,15 @@ static inline void touch_slider_on_change(touch_slider_cb_t callback)
     cap1166_slider_on_change(callback);
 }
 
+/** Whether the pads have LEDs of their own. */
+static inline bool touch_has_leds(void)     { return true; }
+
+/** Pad LEDs go dark after @p timeout_ms untouched; 0 keeps them lit. */
+static inline void touch_led_idle_timeout(uint32_t timeout_ms)
+{
+    cap1166_led_idle_timeout(timeout_ms);
+}
+
 #else   /* TOUCH_IC_CAP1203 */
 
 #define TOUCH_IC_NAME       "CAP1203"
@@ -159,6 +168,10 @@ static inline bool touch_event_wait(touch_event_t *out, uint32_t timeout_ms)
 static inline uint8_t touch_slider_percent(void)      { return TOUCH_SLIDER_RELEASED; }
 static inline uint8_t touch_slider_percent_last(void) { return 0; }
 static inline void touch_slider_on_change(touch_slider_cb_t callback) { (void)callback; }
+
+/* No LED drivers on this part: nothing to time out. */
+static inline bool touch_has_leds(void)     { return false; }
+static inline void touch_led_idle_timeout(uint32_t timeout_ms) { (void)timeout_ms; }
 
 #endif
 

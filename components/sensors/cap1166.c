@@ -726,6 +726,31 @@ static volatile uint8_t  s_pads;
 static volatile bool     s_pads_valid;
 static volatile uint32_t s_pads_updated_ms;
 
+/*
+ * LED idle timeout. The setting is written by any task; everything else here
+ * is owned by touch_task, which is also the only thing that talks to the LED
+ * registers after init, so sleeping and waking never race each other.
+ */
+static volatile uint32_t s_led_timeout_ms;      ///< 0 = never go dark
+static volatile bool     s_led_timeout_changed;
+
+/**
+ * Put every LED out: unlinked, so a touch no longer lights anything, and all
+ * outputs driven dark. Dark first, then unlink, so there is no moment where an
+ * unlinked LED shows whatever the output register last held.
+ */
+static esp_err_t leds_sleep(void)
+{
+    ESP_RETURN_ON_ERROR(cap1166_led_set(0), TAG, "led off failed");
+    return cap1166_led_link(0);
+}
+
+/** Hand the LEDs back to their pads, as init left them. */
+static esp_err_t leds_wake(void)
+{
+    return cap1166_led_link(CAP1166_PADS_ALL);
+}
+
 static void post_event(cap1166_event_t event)
 {
     // Depth 8 against a UI that drains every frame: a full queue means the
@@ -754,6 +779,10 @@ static void touch_task(void *arg)
 
     uint8_t  previous_buttons = 0;
     unsigned consecutive_failures = 0;
+
+    bool     leds_asleep = false;
+    bool     swallowing = false;    ///< the touch that woke the LEDs is still down
+    uint32_t last_touch_ms = now_ms();
 #if CAP1166_DEBUG_DUMP
     uint32_t last_dump_ms = 0;
 #endif
@@ -784,6 +813,53 @@ static void touch_task(void *arg)
         s_pads = pads;
         s_pads_valid = ok;
         s_pads_updated_ms = now_ms();
+
+        /*
+         * LED idle timeout. A new setting restarts the clock, so choosing
+         * "5 s" in the menu does not put the LEDs out on the spot just because
+         * the last touch before that press was long ago -- and choosing
+         * "never" brings them straight back.
+         */
+        if (s_led_timeout_changed) {
+            s_led_timeout_changed = false;
+            last_touch_ms = now_ms();
+            if (s_led_timeout_ms == 0 && leds_asleep && leds_wake() == ESP_OK) {
+                leds_asleep = false;
+            }
+        }
+
+        if (pads != 0) {
+            last_touch_ms = now_ms();
+
+            /*
+             * Any pad wakes them, and that touch is spent on waking: it posts
+             * no button and moves no slider, so a tap aimed at a dark panel
+             * cannot also walk the menu. Held until every pad is let go, so
+             * a finger left resting does not turn into a press either.
+             */
+            if (leds_asleep && leds_wake() == ESP_OK) {
+                leds_asleep = false;
+                swallowing = true;
+                ESP_LOGD(TAG, "leds awake");
+            }
+        }
+
+        if (swallowing) {
+            previous_buttons = (uint8_t)(pads & CAP1166_PADS_BUTTON);
+            if (pads != 0) {
+                goto wait;
+            }
+            swallowing = false;
+        }
+
+        if (!leds_asleep && ok && s_led_timeout_ms != 0 &&
+            now_ms() - last_touch_ms >= s_led_timeout_ms) {
+            if (leds_sleep() == ESP_OK) {
+                leds_asleep = true;
+                ESP_LOGD(TAG, "leds asleep after %lu ms idle",
+                         (unsigned long)s_led_timeout_ms);
+            }
+        }
 
         /*
          * Leading edge only, and only over the three button pads -- the slider
@@ -822,10 +898,14 @@ static void touch_task(void *arg)
         }
 #endif
 
+wait:;
         /*
          * A finger on the panel is the one thing the part will not interrupt
          * about again until it leaves, so that is when this keeps reading of
          * its own accord. Idle, it waits to be told.
+         *
+         * The idle backstop also paces the LED timeout, which therefore lands
+         * up to POLL_IDLE_MS late -- half a second against a 5 s minimum.
          */
         uint32_t wait_ms;
         if (backing_off) {
@@ -877,6 +957,17 @@ esp_err_t cap1166_start(void)
 #endif
 
     return ESP_OK;
+}
+
+void cap1166_led_idle_timeout(uint32_t timeout_ms)
+{
+    s_led_timeout_ms = timeout_ms;
+    s_led_timeout_changed = true;
+
+    // Act on it now rather than at the end of a 500 ms idle wait.
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
 }
 
 bool cap1166_event_wait(cap1166_event_t *out, uint32_t timeout_ms)

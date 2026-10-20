@@ -64,6 +64,7 @@ static struct {
     bool             use_fahrenheit;
     bool             dark_theme;
     uint8_t          frontlight;    ///< index into FRONTLIGHT_LEVELS
+    uint8_t          pad_led;       ///< index into PAD_LED_TIMEOUTS
     ui_prompt_t      prompt;
     int64_t          prompt_since_us;
 } s_ui = {
@@ -71,6 +72,7 @@ static struct {
     .metric = DISPLAY_METRIC_PM25,
     .led_on = true,
     .frontlight = 0,                // off until asked for; see apply_frontlight()
+    .pad_led = 2,                   // 15 s
 };
 
 
@@ -116,6 +118,32 @@ static void apply_frontlight(void)
 
     ESP_LOGI(TAG, "frontlight %s (%.0f%% duty on gpio %d)",
              FRONTLIGHT_LEVELS[s_ui.frontlight].name, percent, PWM_GPIO);
+}
+
+
+/* ------------------------------------------------------------ pad LEDs */
+
+/*
+ * How long the touch pads' own LEDs stay lit with nobody touching the panel.
+ * After that they go dark, and the next tap on any pad only wakes them -- see
+ * cap1166_led_idle_timeout(). A short list cycled by one menu row, like the
+ * frontlight.
+ */
+static const struct {
+    const char *name;
+    uint32_t    timeout_ms;     ///< 0 = never go dark
+} PAD_LED_TIMEOUTS[] = {
+    { "Always on", 0 },
+    { "5 s",       5000 },
+    { "15 s",      15000 },
+    { "30 s",      30000 },
+};
+
+#define PAD_LED_TIMEOUT_COUNT   (sizeof(PAD_LED_TIMEOUTS) / sizeof(PAD_LED_TIMEOUTS[0]))
+
+static void apply_pad_led_timeout(void)
+{
+    touch_led_idle_timeout(PAD_LED_TIMEOUTS[s_ui.pad_led].timeout_ms);
 }
 
 
@@ -544,6 +572,7 @@ static bool handle_prompt_button(touch_event_t event)
 enum {
     MENU_LED,
     MENU_FRONTLIGHT,
+    MENU_PAD_LED,
     MENU_THEME,
     MENU_UNITS,
     MENU_HIGHLIGHT,
@@ -620,6 +649,10 @@ static void fill_menu(display_values_t *v)
     v->rows[MENU_LED]        = (display_row_t){ "LED ring",     s_led_row_value };
     v->rows[MENU_FRONTLIGHT] = (display_row_t){ "Frontlight",
                                                 FRONTLIGHT_LEVELS[s_ui.frontlight].name };
+    v->rows[MENU_PAD_LED]    = (display_row_t){ "Pad LEDs",
+                                                touch_has_leds()
+                                                    ? PAD_LED_TIMEOUTS[s_ui.pad_led].name
+                                                    : "None" };
     v->rows[MENU_THEME]      = (display_row_t){ "Theme",        s_ui.dark_theme ? "Dark" : "Light" };
     v->rows[MENU_UNITS]      = (display_row_t){ "Temperature",  s_ui.use_fahrenheit ? "F" : "C" };
     v->rows[MENU_HIGHLIGHT]  = (display_row_t){ "Highlight",
@@ -650,6 +683,15 @@ static void menu_activate(void)
         // rather than by the row text alone.
         s_ui.frontlight = (uint8_t)((s_ui.frontlight + 1) % FRONTLIGHT_LEVEL_COUNT);
         apply_frontlight();
+        break;
+
+    case MENU_PAD_LED:
+        // Cycles Always on -> 5 s -> 15 s -> 30 s. A part without LEDs keeps
+        // showing "None" and the press does nothing.
+        if (touch_has_leds()) {
+            s_ui.pad_led = (uint8_t)((s_ui.pad_led + 1) % PAD_LED_TIMEOUT_COUNT);
+            apply_pad_led_timeout();
+        }
         break;
 
     case MENU_THEME:
@@ -879,6 +921,8 @@ void app_main(void)
          * Must be set before display_init().
          */
         epaper_set_busy_bypass(true);
+    } else {
+        apply_pad_led_timeout();
     }
 
     if (ws2812_init() != ESP_OK) {
