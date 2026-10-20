@@ -31,10 +31,22 @@ static esp_err_t s12_read_status(uint16_t *status)
     return senseair_modbus_read_input_reg(S12_SLAVE, SENSEAIR_REG_STATUS, status);
 }
 
+static esp_err_t s12_read_info(co2_info_t *info)
+{
+    return senseair_modbus_read_info(S12_SLAVE, info);
+}
+
+static esp_err_t s12_calibrate(co2_cal_t kind, uint16_t target_ppm)
+{
+    return senseair_modbus_calibrate(S12_SLAVE, kind, target_ppm);
+}
+
 const co2_driver_t senseair_s12_driver = {
     .name        = "Senseair S12",
     .part        = CO2_PART_S12,
     .probe       = s12_probe,
     .read_co2    = s12_read_co2,
     .read_status = s12_read_status,
+    .read_info   = s12_read_info,
+    .calibrate   = s12_calibrate,
 };

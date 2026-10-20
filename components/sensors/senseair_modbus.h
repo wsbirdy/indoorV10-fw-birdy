@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include "esp_err.h"
+#include "co2.h"     // co2_cal_t, co2_info_t
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,25 @@ extern "C" {
 #define SENSEAIR_REG_SENSOR_ID_LO   0x001E  // IR31
 
 /*
+ * Holding registers (function codes 0x03 / 0x10). (EE) marks EEPROM-backed
+ * registers: they survive power cycles and wear, so nothing here writes them.
+ */
+#define SENSEAIR_HR_CAL_STATUS      0x0000  // HR1  CO2_CAL_DONE_* bits, cleared by writing 0
+#define SENSEAIR_HR_CAL_COMMAND     0x0001  // HR2  0x7Cxx, acted on at the next measurement
+#define SENSEAIR_HR_CAL_TARGET      0x0002  // HR3  ppm, for the target calibration
+#define SENSEAIR_HR_ABC_TIME        0x0004  // HR5  hours since the last ABC calibration
+#define SENSEAIR_HR_START_SINGLE    0x0009  // HR10 write 1 to measure, single mode only
+#define SENSEAIR_HR_MEAS_MODE       0x000A  // HR11 (EE) 0 continuous, 1 single
+#define SENSEAIR_HR_MEAS_PERIOD     0x000B  // HR12 (EE) seconds, 0 reads as 1
+#define SENSEAIR_HR_ABC_PERIOD      0x000D  // HR14 (EE) hours; 0 or 0xFFFF disables ABC
+#define SENSEAIR_HR_CLEAR_ERROR     0x000E  // HR15 any write clears ErrorStatus
+#define SENSEAIR_HR_ABC_TARGET      0x000F  // HR16 (EE) ppm, background and ABC target
+#define SENSEAIR_HR_METER_CONTROL   0x0012  // HR19 (EE) feature enables, active low
+
+/* Meter control bit 1: set = ABC disabled (the factory default 0x00FE has it set). */
+#define SENSEAIR_METER_ABC_DISABLE  (1u << 1)
+
+/*
  * ErrorStatus bits (TDE15927 section 2.1). The register powers up at 0x0080
  * -- "no measurement completed" -- and clears itself once the first
  * measurement lands, so that bit is not a fault at probe time.
@@ -64,6 +84,22 @@ extern "C" {
 
 /** @brief Read one input register (function code 0x04). */
 esp_err_t senseair_modbus_read_input_reg(uint8_t slave, uint16_t reg, uint16_t *value);
+
+/** @brief Read one holding register (function code 0x03). */
+esp_err_t senseair_modbus_read_holding_reg(uint8_t slave, uint16_t reg, uint16_t *value);
+
+/**
+ * @brief Write one holding register (function code 0x10 with a count of one).
+ *
+ * @return ESP_ERR_NOT_SUPPORTED if the module answered with a Modbus exception
+ */
+esp_err_t senseair_modbus_write_holding_reg(uint8_t slave, uint16_t reg, uint16_t value);
+
+/** @brief Shared body of co2_read_info(); see co2.h. */
+esp_err_t senseair_modbus_read_info(uint8_t slave, co2_info_t *info);
+
+/** @brief Shared body of co2_calibrate(); see co2.h. */
+esp_err_t senseair_modbus_calibrate(uint8_t slave, co2_cal_t kind, uint16_t target_ppm);
 
 /**
  * @brief Read a gas concentration register.
