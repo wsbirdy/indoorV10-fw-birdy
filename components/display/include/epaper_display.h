@@ -139,6 +139,9 @@ typedef struct {
     /** Render temperature in Fahrenheit. The value above stays Celsius. */
     bool use_fahrenheit;
 
+    /** White on black. Applies to every screen, the menu and info pages too. */
+    bool dark_theme;
+
     /* --- Screen selection --- */
     display_screen_t screen;
 

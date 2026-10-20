@@ -448,18 +448,27 @@ static void render_frame(const display_values_t *v)
 
     if (v->screen == DISPLAY_SCREEN_INFO) {
         draw_info(v);
-        return;
-    }
-    if (v->screen == DISPLAY_SCREEN_MENU) {
+    } else if (v->screen == DISPLAY_SCREEN_MENU) {
         draw_menu(v);
-        return;
+    } else {
+        draw_status_bar(v);
+        draw_headline(v);
+        draw_readings(v);
+        gfx_fill_rect(s_render_buf, DIVIDER_X, STATUS_H + 3, 1, FOOTER_Y - STATUS_H - 10, true);
+        draw_footer(v);
     }
 
-    draw_status_bar(v);
-    draw_headline(v);
-    draw_readings(v);
-    gfx_fill_rect(s_render_buf, DIVIDER_X, STATUS_H + 3, 1, FOOTER_Y - STATUS_H - 10, true);
-    draw_footer(v);
+    /*
+     * Dark theme is the light frame with every pixel flipped, done last so no
+     * drawing code has to know about it: the inverted bars and cursor come out
+     * as light bands on black, which is exactly the role they play in light.
+     * The RAM's unused columns flip too, but they are off the glass.
+     */
+    if (v->dark_theme) {
+        for (size_t i = 0; i < sizeof(s_render_buf); i++) {
+            s_render_buf[i] = (uint8_t)~s_render_buf[i];
+        }
+    }
 }
 
 /* ======================================================================
