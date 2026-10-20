@@ -62,6 +62,7 @@ static struct {
     uint8_t          menu_row;
     bool             led_on;
     bool             use_fahrenheit;
+    bool             dark_theme;
     uint8_t          frontlight;    ///< index into FRONTLIGHT_LEVELS
     ui_prompt_t      prompt;
     int64_t          prompt_since_us;
@@ -543,6 +544,7 @@ static bool handle_prompt_button(touch_event_t event)
 enum {
     MENU_LED,
     MENU_FRONTLIGHT,
+    MENU_THEME,
     MENU_UNITS,
     MENU_HIGHLIGHT,
     MENU_UPLOAD,
@@ -618,6 +620,7 @@ static void fill_menu(display_values_t *v)
     v->rows[MENU_LED]        = (display_row_t){ "LED ring",     s_led_row_value };
     v->rows[MENU_FRONTLIGHT] = (display_row_t){ "Frontlight",
                                                 FRONTLIGHT_LEVELS[s_ui.frontlight].name };
+    v->rows[MENU_THEME]      = (display_row_t){ "Theme",        s_ui.dark_theme ? "Dark" : "Light" };
     v->rows[MENU_UNITS]      = (display_row_t){ "Temperature",  s_ui.use_fahrenheit ? "F" : "C" };
     v->rows[MENU_HIGHLIGHT]  = (display_row_t){ "Highlight",
                                                 s_ui.metric == DISPLAY_METRIC_NONE ? "Off" : "On" };
@@ -647,6 +650,13 @@ static void menu_activate(void)
         // rather than by the row text alone.
         s_ui.frontlight = (uint8_t)((s_ui.frontlight + 1) % FRONTLIGHT_LEVEL_COUNT);
         apply_frontlight();
+        break;
+
+    case MENU_THEME:
+        // Every pixel flips, which a partial refresh would leave ghosted; take
+        // the one full refresh now rather than living with the afterimage.
+        s_ui.dark_theme = !s_ui.dark_theme;
+        display_request_full_refresh();
         break;
 
     case MENU_UNITS:
@@ -747,6 +757,7 @@ static void handle_event(touch_event_t event)
 static void apply_ui(display_values_t *v)
 {
     v->use_fahrenheit = s_ui.use_fahrenheit;
+    v->dark_theme     = s_ui.dark_theme;
 
     if (s_ui.prompt != UI_PROMPT_NONE) {
         // Rendered as an ordinary wrapped-text page; the display component has
