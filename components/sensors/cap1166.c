@@ -38,7 +38,7 @@ static const char *TAG = "cap1166";
 #define I2C_TIMEOUT_MS          100
 
 /* DELTA_SENSE 000b: 128x, the most sensitive setting (datasheet table 5.7). */
-#define SENSITIVITY_HIGHEST     2
+#define SENSITIVITY_HIGHEST     0
 
 /*
  * Multiple touch: blocking left on, but raised from one simultaneous touch to
