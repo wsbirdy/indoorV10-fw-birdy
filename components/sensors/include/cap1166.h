@@ -27,7 +27,7 @@ extern "C" {
  *   ALERT#        pulled up to +3.3V and brought out as Touch_INT on GPIO 25.
  *                 What wakes the driver when a pad changes, so it can sleep
  *                 between touches instead of polling. See CAP1166_ALERT_GPIO.
- *   RESET         brought out as Touch_RST on GPIO 26. See CAP1166_RESET_GPIO.
+ *   RESET         not driven by the MCU. See CAP1166_RESET_GPIO.
  *   ADDR_COMM     strapped to ground, see CAP1166_I2C_ADDR below.
  *
  * The LEDs are hardware-linked to their own sensor input, so LED n answers a
@@ -61,8 +61,8 @@ extern "C" {
 #define CAP1166_I2C_ADDR    0x2B
 
 /*
- * RESET -- pin 20 on the 20-QFN, brought out as Touch_RST and driven from
- * GPIO 26.
+ * RESET -- pin 20 on the 20-QFN. No longer wired to the MCU, hence -1: the
+ * driver then skips the reset pulse and talks to the part as power-on left it.
  *
  * Active high, and unusually strong for a reset: while it is high the part is
  * held in deep sleep with the communications block itself in reset, so it will
@@ -74,10 +74,15 @@ extern "C" {
  * floating RESET that settles high holds the part asleep forever -- which
  * looks exactly like a dead or mis-addressed part.
  *
- * Set it to -1 only on a board that ties RESET to ground itself, which is the
- * datasheet's "if not used, connect to ground".
+ * So -1 relies on the board tying RESET to ground itself, which is the
+ * datasheet's "if not used, connect to ground". Set a GPIO number here again
+ * if a board revision routes Touch_RST back to the MCU.
+ *
+ * Without the pulse, a firmware restart (as opposed to a power cycle) leaves
+ * the part configured by whatever ran before. cap1166_init() rewrites every
+ * register it depends on, so that only matters for registers it leaves alone.
  */
-#define CAP1166_RESET_GPIO  26
+#define CAP1166_RESET_GPIO  -1
 
 /*
  * ALERT# -- pin 11 on the 20-QFN, brought out as Touch_INT on GPIO 25 and

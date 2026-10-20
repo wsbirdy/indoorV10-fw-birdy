@@ -71,8 +71,10 @@ static const char *TAG = "cap1166";
  * boundary -- which may be microseconds away. Two ticks is what makes the
  * 10 ms minimum a minimum.
  */
+#if CAP1166_RESET_GPIO >= 0
 #define RESET_ASSERT_TICKS  (pdMS_TO_TICKS(15) + 1)     // >= tRST_DLY
 #define RESET_COMMS_TICKS   (pdMS_TO_TICKS(20) + 1)     // >= tCOMM_DLY
+#endif
 
 /*
  * LED polarity: non-inverted on every channel, which is what makes the panel
@@ -297,7 +299,11 @@ static esp_err_t reset_part(void)
     return ESP_OK;
 }
 #else
-/* RESET is tied to ground on the board; there is nothing to drive. */
+/*
+ * RESET is tied to ground on the board; there is nothing to drive. Power-on
+ * reset is long finished by now: app_main gets here seconds after boot, far
+ * past the part's 15 ms tCOMM_DLY.
+ */
 static esp_err_t reset_part(void)
 {
     return ESP_OK;
