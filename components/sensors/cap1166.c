@@ -23,6 +23,7 @@ static const char *TAG = "cap1166";
 #define REG_INTERRUPT_ENABLE    0x27
 #define REG_REPEAT_RATE_ENABLE  0x28
 #define REG_MULTIPLE_TOUCH_CFG  0x2A
+#define REG_BASE_COUNT_1        0x50    // ..0x55, one per pad
 #define REG_LED_LINKING         0x72
 #define REG_LED_POLARITY        0x73
 #define REG_LED_OUTPUT_CONTROL  0x74
@@ -441,6 +442,18 @@ esp_err_t cap1166_read_deltas(int8_t delta[6])
     return ESP_OK;
 }
 
+esp_err_t cap1166_read_base_counts(uint8_t base[6])
+{
+    ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(base, ESP_ERR_INVALID_ARG, TAG, "NULL out pointer");
+
+    for (int i = 0; i < 6; i++) {
+        ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_BASE_COUNT_1 + i), &base[i]), TAG,
+                            "base count %d read failed", i + 1);
+    }
+    return ESP_OK;
+}
+
 esp_err_t cap1166_set_sensitivity(uint8_t delta_sense)
 {
     ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
@@ -732,13 +745,18 @@ static void post_event(cap1166_event_t event)
 #if CAP1166_DEBUG_DUMP
 static void dump_tick(uint8_t pads)
 {
-    int8_t delta[6] = { 0 };
-    if (cap1166_read_deltas(delta) != ESP_OK) {
+    int8_t  delta[6] = { 0 };
+    uint8_t base[6]  = { 0 };
+    if (cap1166_read_deltas(delta) != ESP_OK || cap1166_read_base_counts(base) != ESP_OK) {
         return;
     }
-    ESP_LOGI(DBG_TAG, "pads 0x%02X | btn %4d %4d %4d | slider %4d %4d %4d -> %u",
+    // Delta beside base: a delta that moves while its base holds still is a
+    // finger, a base that wanders is the reference recalibrating under it.
+    ESP_LOGI(DBG_TAG, "pads 0x%02X | btn %4d %4d %4d | slider %4d %4d %4d -> %u"
+                      " | base %3u %3u %3u | %3u %3u %3u",
              pads, delta[0], delta[1], delta[2], delta[3], delta[4], delta[5],
-             cap1166_slider_percent());
+             cap1166_slider_percent(),
+             base[0], base[1], base[2], base[3], base[4], base[5]);
 }
 #endif
 

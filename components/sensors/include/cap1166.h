@@ -141,6 +141,22 @@ esp_err_t cap1166_read(uint8_t *pads);
 esp_err_t cap1166_read_deltas(int8_t delta[6]);
 
 /**
+ * @brief Read the per-pad base counts, the calibrated "not touched" reference
+ *        each delta count is measured against.
+ *
+ * Moves only when the part recalibrates, so it is the number to watch when a
+ * pad starts reporting touches on its own: a base that drifts says the
+ * reference is wandering, a steady one says the noise is in the delta.
+ * Scaled by BASE_SHIFT in the sensitivity register; reset value C8h.
+ *
+ * Safe to call from any task: it reads only, and does not clear the latched
+ * interrupt the polling task depends on.
+ *
+ * @param base receives six counts, CS1 first.
+ */
+esp_err_t cap1166_read_base_counts(uint8_t base[6]);
+
+/**
  * @brief Set touch sensitivity.
  *
  * Numbered exactly as the datasheet's DELTA_SENSE[2:0] field (table 5.7), so

@@ -87,6 +87,9 @@ typedef void (*touch_slider_cb_t)(uint8_t percent);
 
 #define TOUCH_IC_NAME       "CAP1166"
 
+/** Sensor inputs on the part: buttons first, then the slider. */
+#define TOUCH_PAD_COUNT     6
+
 /** Slider pads, for reading them out of touch_pads(). */
 #define TOUCH_PADS_SLIDER   CAP1166_PADS_SLIDER
 
@@ -96,6 +99,12 @@ static inline esp_err_t touch_start(void)   { return cap1166_start(); }
 static inline uint8_t  touch_pads(void)     { return cap1166_pads(); }
 static inline bool     touch_pads_valid(void)      { return cap1166_pads_valid(); }
 static inline uint32_t touch_pads_updated_ms(void) { return cap1166_pads_updated_ms(); }
+
+/** Per-pad base counts, CS1 first. Reads the part, so not for a hot path. */
+static inline esp_err_t touch_read_base_counts(uint8_t base[TOUCH_PAD_COUNT])
+{
+    return cap1166_read_base_counts(base);
+}
 
 static inline bool touch_event_wait(touch_event_t *out, uint32_t timeout_ms)
 {
@@ -128,6 +137,9 @@ static inline void touch_slider_on_change(touch_slider_cb_t callback)
 
 #define TOUCH_IC_NAME       "CAP1203"
 
+/** Sensor inputs on the part. */
+#define TOUCH_PAD_COUNT     3
+
 /** No slider pads on this part, so nothing in touch_pads() belongs to one. */
 #define TOUCH_PADS_SLIDER   0x00
 
@@ -137,6 +149,12 @@ static inline esp_err_t touch_start(void)   { return cap1203_buttons_start(); }
 static inline uint8_t  touch_pads(void)     { return cap1203_pads(); }
 static inline bool     touch_pads_valid(void)      { return cap1203_pads_valid(); }
 static inline uint32_t touch_pads_updated_ms(void) { return cap1203_pads_updated_ms(); }
+
+/** Per-pad base counts, CS1 first. Reads the part, so not for a hot path. */
+static inline esp_err_t touch_read_base_counts(uint8_t base[TOUCH_PAD_COUNT])
+{
+    return cap1203_read_base_counts(base);
+}
 
 static inline bool touch_event_wait(touch_event_t *out, uint32_t timeout_ms)
 {

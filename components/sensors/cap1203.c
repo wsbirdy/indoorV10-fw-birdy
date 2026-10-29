@@ -344,6 +344,18 @@ esp_err_t cap1203_read(uint8_t *pads)
     return ESP_OK;
 }
 
+esp_err_t cap1203_read_base_counts(uint8_t base[3])
+{
+    ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(base, ESP_ERR_INVALID_ARG, TAG, "NULL out pointer");
+
+    for (int i = 0; i < 3; i++) {
+        ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_BASE_COUNT_1 + i), &base[i]), TAG,
+                            "base count %d read failed", i + 1);
+    }
+    return ESP_OK;
+}
+
 esp_err_t cap1203_set_sensitivity(uint8_t delta_sense)
 {
     ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");

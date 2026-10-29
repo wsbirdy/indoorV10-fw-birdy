@@ -25,6 +25,17 @@ esp_err_t cap1203_init(void);
 esp_err_t cap1203_read(uint8_t *pads);
 
 /**
+ * @brief Read the per-pad base counts, the calibrated "not touched" reference
+ *        each delta count is measured against.
+ *
+ * Read only, so safe beside the button task: it does not clear the latched
+ * interrupt that task depends on.
+ *
+ * @param base receives three counts, CS1 first.
+ */
+esp_err_t cap1203_read_base_counts(uint8_t base[3]);
+
+/**
  * @brief Set touch sensitivity.
  *
  * Numbered exactly as the datasheet's DELTA_SENSE[2:0] field (table 5-7), so

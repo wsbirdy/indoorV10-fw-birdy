@@ -305,11 +305,23 @@ static void report_task(void *arg)
                 }
             }
 
-            ESP_LOGI(TAG, "%s  pads %c%c%c%s  led bar %u%%  (t=%lu ms)", TOUCH_IC_NAME,
+            // The untouched reference each pad is judged against, CS1 first.
+            // Read fresh rather than cached: it only moves on recalibration, and
+            // one read every report is nothing on the bus.
+            char base[8 + TOUCH_PAD_COUNT * 4] = "  base --";
+            uint8_t counts[TOUCH_PAD_COUNT];
+            if (touch_read_base_counts(counts) == ESP_OK) {
+                int len = snprintf(base, sizeof(base), "  base");
+                for (int i = 0; i < TOUCH_PAD_COUNT; i++) {
+                    len += snprintf(base + len, sizeof(base) - (size_t)len, " %u", counts[i]);
+                }
+            }
+
+            ESP_LOGI(TAG, "%s  pads %c%c%c%s%s  led bar %u%%  (t=%lu ms)", TOUCH_IC_NAME,
                      (pads & TOUCH_PAD_LEFT)  ? 'L' : '-',
                      (pads & TOUCH_PAD_ENTER) ? 'E' : '-',
                      (pads & TOUCH_PAD_RIGHT) ? 'R' : '-',
-                     slider, s_led_brightness_pct,
+                     slider, base, s_led_brightness_pct,
                      (unsigned long)touch_pads_updated_ms());
         } else {
             ESP_LOGW(TAG, "%s  read failed", TOUCH_IC_NAME);
