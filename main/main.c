@@ -1,5 +1,8 @@
 #include <ctype.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "sdkconfig.h"
@@ -243,8 +246,26 @@ static uint8_t brightness_scale(uint8_t percent)
  * ws2812 takes its own lock, which is what makes this safe against report_task
  * painting the AQI colour at the same moment.
  */
+/*
+ * Range the slider has covered during the touch test's slider step. Written
+ * here, on the touch task, because the callback sees every position while the
+ * ui loop only sees the end of the gesture. See touch_test_poll().
+ */
+static volatile bool    s_tt_slider_tracking;
+static volatile uint8_t s_tt_slider_min = 100;
+static volatile uint8_t s_tt_slider_max = 0;
+
 static void on_slider_moved(uint8_t percent)
 {
+    if (s_tt_slider_tracking) {
+        if (percent < s_tt_slider_min) {
+            s_tt_slider_min = percent;
+        }
+        if (percent > s_tt_slider_max) {
+            s_tt_slider_max = percent;
+        }
+    }
+
     s_led_brightness_pct = percent;
     ws2812_set_brightness(brightness_scale(percent));
     ws2812_refresh();
@@ -619,6 +640,7 @@ enum {
     MENU_UPLOAD,
     MENU_REFRESH_RATE,
     MENU_REFRESH,
+    MENU_TOUCH_TEST,
     MENU_ABOUT,
     MENU_BACK,
     MENU_ROW_COUNT,
@@ -705,6 +727,7 @@ static void fill_menu(display_values_t *v)
     v->rows[MENU_REFRESH_RATE] = (display_row_t){ "Refresh rate",
                                                   REFRESH_RATES[s_ui.refresh].name };
     v->rows[MENU_REFRESH]    = (display_row_t){ "Full refresh", NULL };
+    v->rows[MENU_TOUCH_TEST] = (display_row_t){ "Touch test",   NULL };
     v->rows[MENU_ABOUT]      = (display_row_t){ "About",        NULL };
     v->rows[MENU_BACK]       = (display_row_t){ "Back",         NULL };
 
@@ -712,6 +735,8 @@ static void fill_menu(display_values_t *v)
     v->selected_row = s_ui.menu_row;
     v->menu_title   = "MENU";
 }
+
+static void touch_test_begin(void);
 
 static void menu_activate(void)
 {
@@ -766,6 +791,10 @@ static void menu_activate(void)
     case MENU_REFRESH:
         display_request_full_refresh();
         s_ui.screen = DISPLAY_SCREEN_HOME;
+        break;
+
+    case MENU_TOUCH_TEST:
+        touch_test_begin();
         break;
 
     case MENU_ABOUT:
@@ -875,8 +904,523 @@ static void update_link_notice(void)
     s_link_was_up = up;
 }
 
+
+/* --------------------------------------------------------------- touch test */
+
+/*
+ * A guided check of the touch panel, started from the menu, for bringing up a
+ * board or chasing a pad that "sometimes doesn't work".
+ *
+ *   1. Idle     the chip answers and every pad reads released. The press
+ *               that started the test is given TT_RELEASE_MS to lift; a pad
+ *               still down after that is reported stuck.
+ *   2..4.       left, middle, right, one at a time, each within TT_STEP_MS.
+ *               A different pad answering is noted -- crosstalk or a mixed-up
+ *               layout -- but does not fail the step.
+ *   5. Slider   only on a part that has one: one swipe has to cover both
+ *               ends of the strip, TT_SLIDER_LOW and TT_SLIDER_HIGH.
+ *
+ * Pass/fail alone does not tell a pad that barely made it from one with room
+ * to spare, so the test also reads each pad's delta count -- its signal --
+ * against the threshold the part judges a touch by, live on the page and as
+ * the best seen per pad in the result. These go through touch.h like
+ * everything else here, so the test is the same on every supported part.
+ *
+ * The result stays on the panel, and goes to the log along with a full
+ * register dump, until any pad is pressed. While the test runs it owns every pad, so nothing can open the menu
+ * or walk it by accident.
+ *
+ * The test changes nothing it does not put back: the pad LEDs are held lit for
+ * its duration (a dark panel spends the first touch on waking, which would
+ * read as a missed press), and the LED bar brightness the swipe moves is
+ * restored at the end.
+ */
+#define TT_RELEASE_MS   3000
+#define TT_STEP_MS      10000
+#define TT_SLIDER_MS    15000
+#define TT_TICK_MS      1000    ///< repaint cadence while running, for the countdown
+#define TT_SLIDER_LOW   15
+#define TT_SLIDER_HIGH  85
+
+typedef enum {
+    TT_OFF = 0,
+    TT_IDLE,
+    TT_LEFT,
+    TT_MIDDLE,
+    TT_RIGHT,
+    TT_SLIDER,
+    TT_DONE,
+} tt_step_t;
+
+typedef enum {
+    TT_PENDING = 0,
+    TT_PASS,
+    TT_FAIL,
+    TT_SKIPPED,
+} tt_result_t;
+
+/* Owned by ui_task, apart from the slider range above. */
+static struct {
+    tt_step_t   step;
+    int64_t     step_since_us;
+    tt_result_t result[TT_DONE];    ///< indexed by step
+    uint8_t     stray[TT_DONE];     ///< TOUCH_PAD_* bits that answered instead
+    uint8_t     stuck;              ///< pads still down when the idle check gave up
+    bool        no_response;        ///< the chip never answered
+    uint8_t     saved_brightness;
+
+    bool        signal_ok;          ///< the last delta read succeeded
+    int8_t      delta[TOUCH_BUTTON_COUNT];      ///< live, left first
+    int8_t      peak[TOUCH_BUTTON_COUNT];       ///< best seen during that pad's step
+    bool        have_threshold;
+    uint8_t     threshold[TOUCH_BUTTON_COUNT];
+} s_tt;
+
+/* Which button a pad step is asking for, as an index into delta[]. */
+static int tt_step_pad(tt_step_t step)
+{
+    switch (step) {
+    case TT_LEFT:   return 0;
+    case TT_MIDDLE: return 1;
+    case TT_RIGHT:  return 2;
+    default:        return -1;
+    }
+}
+
+/*
+ * Read the live deltas, and fold the one being asked for into its peak.
+ * Sampled every pass and again on the press itself, while the finger is still
+ * down, so a quick tap between two passes still leaves its mark.
+ */
+static void tt_sample_signal(void)
+{
+    s_tt.signal_ok = (touch_read_button_deltas(s_tt.delta) == ESP_OK);
+    if (!s_tt.signal_ok) {
+        return;
+    }
+
+    const int pad = tt_step_pad(s_tt.step);
+    if (pad >= 0 && s_tt.delta[pad] > s_tt.peak[pad]) {
+        s_tt.peak[pad] = s_tt.delta[pad];
+    }
+}
+
+static char s_tt_text[480];
+
+static bool touch_test_active(void)
+{
+    return s_tt.step != TT_OFF;
+}
+
+static uint32_t tt_elapsed_ms(void)
+{
+    return (uint32_t)((esp_timer_get_time() - s_tt.step_since_us) / 1000);
+}
+
+/* "L M -" -- the three buttons, in panel order, as the instructions name them. */
+static void tt_pad_letters(uint8_t pads, char out[6])
+{
+    out[0] = (pads & TOUCH_PAD_LEFT)  ? 'L' : '-';
+    out[1] = ' ';
+    out[2] = (pads & TOUCH_PAD_ENTER) ? 'M' : '-';
+    out[3] = ' ';
+    out[4] = (pads & TOUCH_PAD_RIGHT) ? 'R' : '-';
+    out[5] = '\0';
+}
+
+static void tt_enter(tt_step_t step)
+{
+    s_tt.step = step;
+    s_tt.step_since_us = esp_timer_get_time();
+
+    if (step == TT_SLIDER) {
+        s_tt_slider_min = 100;
+        s_tt_slider_max = 0;
+        s_tt_slider_tracking = true;
+    }
+}
+
+static const char *tt_result_name(tt_result_t r)
+{
+    switch (r) {
+    case TT_PASS:    return "OK";
+    case TT_FAIL:    return "FAIL";
+    case TT_SKIPPED: return "skipped";
+    default:         return "-";
+    }
+}
+
+/** Every step that ran passed. */
+static bool tt_passed(void)
+{
+    for (int i = TT_IDLE; i < TT_DONE; i++) {
+        if (s_tt.result[i] == TT_FAIL) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Put back what the test borrowed. Safe to call more than once. */
+static void tt_restore(void)
+{
+    s_tt_slider_tracking = false;
+
+    if (touch_has_slider() && s_led_brightness_pct != s_tt.saved_brightness) {
+        s_led_brightness_pct = s_tt.saved_brightness;
+        ws2812_set_brightness(brightness_scale(s_tt.saved_brightness));
+        ws2812_refresh();
+    }
+
+    apply_pad_led_timeout();
+}
+
+static void tt_finish(void)
+{
+    tt_restore();
+
+    // The full picture for whoever reads the log: thresholds, gain, noise
+    // flags, base counts. Advisory, so a failed dump changes no result.
+    if (!s_tt.no_response) {
+        (void)touch_dump_registers();
+    }
+
+    ESP_LOGI(TAG, "touch test peaks (delta/threshold): left %d/%u, middle %d/%u, right %d/%u",
+             s_tt.peak[0], s_tt.threshold[0], s_tt.peak[1], s_tt.threshold[1],
+             s_tt.peak[2], s_tt.threshold[2]);
+
+    ESP_LOGI(TAG, "touch test %s: idle %s%s, left %s, middle %s, right %s, slider %s (%u-%u%%)",
+             tt_passed() ? "PASS" : "FAIL",
+             tt_result_name(s_tt.result[TT_IDLE]),
+             s_tt.no_response ? " (no response)" : (s_tt.stuck ? " (pad stuck)" : ""),
+             tt_result_name(s_tt.result[TT_LEFT]),
+             tt_result_name(s_tt.result[TT_MIDDLE]),
+             tt_result_name(s_tt.result[TT_RIGHT]),
+             tt_result_name(s_tt.result[TT_SLIDER]),
+             s_tt_slider_min, s_tt_slider_max);
+
+    s_tt.step = TT_DONE;
+}
+
+static void tt_advance(void)
+{
+    switch (s_tt.step) {
+    case TT_IDLE:   tt_enter(TT_LEFT);   break;
+    case TT_LEFT:   tt_enter(TT_MIDDLE); break;
+    case TT_MIDDLE: tt_enter(TT_RIGHT);  break;
+    case TT_RIGHT:
+        if (touch_has_slider()) {
+            tt_enter(TT_SLIDER);
+        } else {
+            s_tt.result[TT_SLIDER] = TT_SKIPPED;
+            tt_finish();
+        }
+        break;
+    case TT_SLIDER:
+        s_tt_slider_tracking = false;
+        tt_finish();
+        break;
+    default:
+        break;
+    }
+}
+
+static void tt_settle(tt_result_t result)
+{
+    s_tt.result[s_tt.step] = result;
+    tt_advance();
+}
+
+static bool tt_slider_covered(void)
+{
+    return s_tt_slider_min <= TT_SLIDER_LOW && s_tt_slider_max >= TT_SLIDER_HIGH;
+}
+
+static void touch_test_begin(void)
+{
+    memset(&s_tt, 0, sizeof(s_tt));
+    s_tt.saved_brightness = s_led_brightness_pct;
+
+    // Held lit, so no touch is spent waking a dark panel. See the note above.
+    touch_led_idle_timeout(0);
+
+    // Configuration, not live state: read once. Missing thresholds just leave
+    // the signal shown without its yardstick.
+    s_tt.have_threshold = (touch_read_button_thresholds(s_tt.threshold) == ESP_OK);
+
+    s_ui.screen = DISPLAY_SCREEN_INFO;
+    tt_enter(TT_IDLE);
+    ESP_LOGI(TAG, "touch test started (%s)", TOUCH_IC_NAME);
+}
+
+/** Time-driven half of the test; called once per ui_task pass. */
+static void touch_test_poll(void)
+{
+    if (!touch_test_active()) {
+        return;
+    }
+
+    /*
+     * Something else took the screen -- the Wi-Fi offer is the only thing that
+     * can. Abandon quietly rather than leave a half-run test owning the pads
+     * behind a page nobody can see.
+     */
+    if (s_ui.screen != DISPLAY_SCREEN_INFO) {
+        tt_restore();
+        s_tt.step = TT_OFF;
+        ESP_LOGI(TAG, "touch test abandoned");
+        return;
+    }
+
+    if (s_tt.step != TT_DONE) {
+        tt_sample_signal();
+    }
+
+    const uint32_t elapsed = tt_elapsed_ms();
+
+    switch (s_tt.step) {
+    case TT_IDLE:
+        if (touch_pads_valid() && touch_pads() == 0) {
+            tt_settle(TT_PASS);
+        } else if (elapsed >= TT_RELEASE_MS) {
+            if (!touch_pads_valid()) {
+                // Nothing after this can pass; say so now rather than make
+                // someone sit through three timeouts to learn it.
+                s_tt.no_response = true;
+                s_tt.result[TT_IDLE] = TT_FAIL;
+                for (int i = TT_LEFT; i < TT_DONE; i++) {
+                    s_tt.result[i] = TT_SKIPPED;
+                }
+                tt_finish();
+            } else {
+                s_tt.stuck = touch_pads();
+                tt_settle(TT_FAIL);
+            }
+        }
+        break;
+
+    case TT_LEFT:
+    case TT_MIDDLE:
+    case TT_RIGHT:
+        if (elapsed >= TT_STEP_MS) {
+            tt_settle(TT_FAIL);
+        }
+        break;
+
+    case TT_SLIDER:
+        if (tt_slider_covered()) {
+            tt_settle(TT_PASS);
+        } else if (elapsed >= TT_SLIDER_MS) {
+            tt_settle(TT_FAIL);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/** Event-driven half: every pad comes here while the test is running. */
+static void touch_test_event(touch_event_t event)
+{
+    static const struct {
+        tt_step_t     step;
+        touch_event_t event;
+        uint8_t       pad;
+    } PADS[] = {
+        { TT_LEFT,   TOUCH_EVENT_LEFT,  TOUCH_PAD_LEFT },
+        { TT_MIDDLE, TOUCH_EVENT_ENTER, TOUCH_PAD_ENTER },
+        { TT_RIGHT,  TOUCH_EVENT_RIGHT, TOUCH_PAD_RIGHT },
+    };
+
+    switch (s_tt.step) {
+    case TT_DONE:
+        // Any pad, slider included, closes the result.
+        s_tt.step = TT_OFF;
+        s_ui.screen = DISPLAY_SCREEN_MENU;
+        return;
+
+    case TT_LEFT:
+    case TT_MIDDLE:
+    case TT_RIGHT:
+        for (size_t i = 0; i < sizeof(PADS) / sizeof(PADS[0]); i++) {
+            if (PADS[i].event != event) {
+                continue;
+            }
+            if (PADS[i].step == s_tt.step) {
+                tt_sample_signal();     // finger still down: catch its peak
+                tt_settle(TT_PASS);
+            } else {
+                s_tt.stray[s_tt.step] |= PADS[i].pad;
+            }
+            return;
+        }
+        return;     // a slider gesture is not an answer here
+
+    case TT_SLIDER:
+        // The callback has the range already; the end of a gesture is just
+        // the moment to judge it, rather than waiting for the next tick.
+        if (event == TOUCH_EVENT_SLIDER && tt_slider_covered()) {
+            tt_settle(TT_PASS);
+        }
+        return;
+
+    case TT_IDLE:
+    default:
+        return;     // nothing asked for yet
+    }
+}
+
+static int tt_append(int n, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+static int tt_append(int n, const char *fmt, ...)
+{
+    if (n < 0 || (size_t)n >= sizeof(s_tt_text)) {
+        return n;
+    }
+    va_list args;
+    va_start(args, fmt);
+    const int wrote = vsnprintf(s_tt_text + n, sizeof(s_tt_text) - (size_t)n, fmt, args);
+    va_end(args);
+    return (wrote < 0) ? n : n + wrote;
+}
+
+/* One line of the result page, e.g. "Left    OK  peak 87/64, also saw R". */
+static int tt_append_pad_result(int n, const char *label, tt_step_t step)
+{
+    n = tt_append(n, "%-8s%-5s", label, tt_result_name(s_tt.result[step]));
+    if (s_tt.result[step] != TT_SKIPPED) {
+        // The peak is what separates a dead pad (near 0) from a weak one
+        // (close under the threshold) when a step fails.
+        const int pad = tt_step_pad(step);
+        if (s_tt.have_threshold) {
+            n = tt_append(n, " peak %d/%u", s_tt.peak[pad], s_tt.threshold[pad]);
+        } else {
+            n = tt_append(n, " peak %d", s_tt.peak[pad]);
+        }
+    }
+    if (s_tt.stray[step]) {
+        char pads[6];
+        tt_pad_letters(s_tt.stray[step], pads);
+        n = tt_append(n, ", also saw %s", pads);
+    }
+    return tt_append(n, "\n");
+}
+
+/*
+ * "Signal L 3 M 71 R -1  of 64" -- live deltas, and the threshold they have to
+ * reach when the thresholds share one value, which is the usual case. Mixed
+ * thresholds get a line of their own rather than a misleading single number.
+ */
+static int tt_append_signal(int n)
+{
+    if (!s_tt.signal_ok) {
+        return tt_append(n, "Signal: (no answer)\n");
+    }
+
+    n = tt_append(n, "Signal L %d M %d R %d", s_tt.delta[0], s_tt.delta[1], s_tt.delta[2]);
+
+    if (!s_tt.have_threshold) {
+        return tt_append(n, "\n");
+    }
+    if (s_tt.threshold[0] == s_tt.threshold[1] && s_tt.threshold[1] == s_tt.threshold[2]) {
+        return tt_append(n, "  of %u\n", s_tt.threshold[0]);
+    }
+    return tt_append(n, "\nThreshold L %u M %u R %u\n",
+                     s_tt.threshold[0], s_tt.threshold[1], s_tt.threshold[2]);
+}
+
+/* Page text for the current step. Built every pass, so the countdown moves. */
+static const char *touch_test_text(void)
+{
+    static const char *const INSTRUCTION[TT_DONE] = {
+        [TT_LEFT]   = "Touch the LEFT pad.",
+        [TT_MIDDLE] = "Touch the MIDDLE pad.",
+        [TT_RIGHT]  = "Touch the RIGHT pad.",
+        [TT_SLIDER] = "Slide one finger along the whole strip, end to end.",
+    };
+
+    const int total = touch_has_slider() ? 4 : 3;
+    int n = 0;
+
+    if (s_tt.step == TT_DONE) {
+        n = tt_append(n, "TOUCH TEST: %s\n\n", tt_passed() ? "PASS" : "FAIL");
+
+        n = tt_append(n, "%-8s", "Idle");
+        if (s_tt.no_response) {
+            n = tt_append(n, "FAIL - %s not answering\n", TOUCH_IC_NAME);
+        } else if (s_tt.stuck) {
+            char pads[6];
+            tt_pad_letters(s_tt.stuck, pads);
+            n = tt_append(n, "FAIL - stuck: %s%s\n", pads,
+                          (s_tt.stuck & TOUCH_PADS_SLIDER) ? " +slider" : "");
+        } else {
+            n = tt_append(n, "OK, %s answering\n", TOUCH_IC_NAME);
+        }
+
+        n = tt_append_pad_result(n, "Left",   TT_LEFT);
+        n = tt_append_pad_result(n, "Middle", TT_MIDDLE);
+        n = tt_append_pad_result(n, "Right",  TT_RIGHT);
+
+        if (touch_has_slider()) {
+            n = tt_append(n, "%-8s%s", "Slider", tt_result_name(s_tt.result[TT_SLIDER]));
+            if (s_tt.result[TT_SLIDER] != TT_SKIPPED) {
+                if (s_tt_slider_max >= s_tt_slider_min) {
+                    n = tt_append(n, " - covered %u-%u%%", s_tt_slider_min, s_tt_slider_max);
+                } else {
+                    n = tt_append(n, " - never touched");
+                }
+            }
+            n = tt_append(n, "\n");
+        }
+
+        tt_append(n, "\nAny pad: back to the menu.");
+        return s_tt_text;
+    }
+
+    const uint32_t elapsed = tt_elapsed_ms();
+    char pads[6];
+    tt_pad_letters(touch_pads(), pads);
+
+    if (s_tt.step == TT_IDLE) {
+        n = tt_append(n, "TOUCH TEST\n\nChecking the panel.\nLift your finger off every pad.\n\n");
+        n = tt_append(n, "Touched now: %s\n", touch_pads_valid() ? pads : "(no answer)");
+        tt_append_signal(n);
+        return s_tt_text;
+    }
+
+    const uint32_t limit = (s_tt.step == TT_SLIDER) ? TT_SLIDER_MS : TT_STEP_MS;
+    const uint32_t left_s = (elapsed >= limit) ? 0 : (limit - elapsed + 999) / 1000;
+
+    n = tt_append(n, "TOUCH TEST  step %d of %d\n\n%s\n\n",
+                  (int)(s_tt.step - TT_IDLE), total, INSTRUCTION[s_tt.step]);
+    n = tt_append(n, "Touched now: %s\n", touch_pads_valid() ? pads : "(no answer)");
+    n = tt_append_signal(n);
+
+    if (s_tt.step == TT_SLIDER) {
+        if (s_tt_slider_max >= s_tt_slider_min) {
+            n = tt_append(n, "Covered so far: %u-%u%%\n", s_tt_slider_min, s_tt_slider_max);
+        } else {
+            n = tt_append(n, "Covered so far: nothing\n");
+        }
+    } else if (s_tt.stray[s_tt.step]) {
+        char stray[6];
+        tt_pad_letters(s_tt.stray[s_tt.step], stray);
+        n = tt_append(n, "Wrong pad answered: %s\n", stray);
+    }
+
+    tt_append(n, "Time left: %lu s\n", (unsigned long)left_s);
+    return s_tt_text;
+}
+
 static void handle_event(touch_event_t event)
 {
+    // The test owns every pad while it runs -- unless the Wi-Fi offer has
+    // taken the screen, in which case touch_test_poll() is about to abandon it.
+    if (touch_test_active() && s_ui.prompt == UI_PROMPT_NONE) {
+        touch_test_event(event);
+        return;
+    }
 
     if (event == TOUCH_EVENT_SLIDER) {
         /*
@@ -949,7 +1493,7 @@ static void apply_ui(display_values_t *v)
         break;
     case DISPLAY_SCREEN_INFO:
     default:
-        v->info_text = s_about_text;
+        v->info_text = touch_test_active() ? touch_test_text() : s_about_text;
         break;
     }
 }
@@ -971,6 +1515,11 @@ static uint32_t ui_wait_ms(void)
     const bool offer_pending = s_wifi_ready && !s_boot_ask_done && !wifi_sta_is_online();
     if (s_ui.prompt != UI_PROMPT_NONE || offer_pending) {
         wait_ms = DISPLAY_TICK_MS < wait_ms ? DISPLAY_TICK_MS : wait_ms;
+    }
+
+    // A running touch test counts down on screen.
+    if (touch_test_active() && s_tt.step != TT_DONE && TT_TICK_MS < wait_ms) {
+        wait_ms = TT_TICK_MS;
     }
 
     // A notification leaves the moment it expires, not a frame later.
@@ -1005,6 +1554,7 @@ static void ui_task(void *arg)
         // and clear itself without anybody touching the panel.
         update_wifi_prompt();
         update_link_notice();
+        touch_test_poll();
 
         air_monitor_device dev;
         air_monitor_get(&dev);
