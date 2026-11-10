@@ -85,6 +85,27 @@ typedef enum {
 typedef void (*touch_slider_cb_t)(uint8_t percent);
 
 
+/* ----------------------------------------------------------------------
+ * Diagnostics, the same on every part. Cover the three button pads, which
+ * every fit has at CS1..CS3. Safe from any task: they read registers the
+ * touch task does not clear.
+ * ---------------------------------------------------------------------- */
+
+/** Pads the diagnostics below report on: left, enter, right. */
+#define TOUCH_BUTTON_COUNT  3
+
+/**
+ * Per-pad delta counts (signal) and touch thresholds, left first. A pad reads
+ * as touched once its delta reaches its threshold, so the two together say
+ * how much margin a press has.
+ */
+static inline esp_err_t touch_read_button_deltas(int8_t delta[TOUCH_BUTTON_COUNT]);
+static inline esp_err_t touch_read_button_thresholds(uint8_t threshold[TOUCH_BUTTON_COUNT]);
+
+/** Log every register by name, on the driver's ".dbg" tag. ~50 I2C reads. */
+static inline esp_err_t touch_dump_registers(void);
+
+
 /* ======================================================================
  * The part behind the panel. One thin mapping per fit; every one of these
  * folds away at compile time.
@@ -140,6 +161,28 @@ static inline void touch_led_idle_timeout(uint32_t timeout_ms)
     cap1166_led_idle_timeout(timeout_ms);
 }
 
+static inline esp_err_t touch_read_button_deltas(int8_t delta[TOUCH_BUTTON_COUNT])
+{
+    int8_t all[6];
+    const esp_err_t err = cap1166_read_deltas(all);
+    for (int i = 0; err == ESP_OK && i < TOUCH_BUTTON_COUNT; i++) {
+        delta[i] = all[i];
+    }
+    return err;
+}
+
+static inline esp_err_t touch_read_button_thresholds(uint8_t threshold[TOUCH_BUTTON_COUNT])
+{
+    uint8_t all[6];
+    const esp_err_t err = cap1166_read_thresholds(all);
+    for (int i = 0; err == ESP_OK && i < TOUCH_BUTTON_COUNT; i++) {
+        threshold[i] = all[i];
+    }
+    return err;
+}
+
+static inline esp_err_t touch_dump_registers(void) { return cap1166_dump_registers(); }
+
 #elif TOUCH_IC == TOUCH_IC_CAP1133
 
 #define TOUCH_IC_NAME       "CAP1133"
@@ -181,6 +224,18 @@ static inline void touch_led_idle_timeout(uint32_t timeout_ms)
     cap1133_led_idle_timeout(timeout_ms);
 }
 
+static inline esp_err_t touch_read_button_deltas(int8_t delta[TOUCH_BUTTON_COUNT])
+{
+    return cap1133_read_deltas(delta);
+}
+
+static inline esp_err_t touch_read_button_thresholds(uint8_t threshold[TOUCH_BUTTON_COUNT])
+{
+    return cap1133_read_thresholds(threshold);
+}
+
+static inline esp_err_t touch_dump_registers(void) { return cap1133_dump_registers(); }
+
 #else   /* TOUCH_IC_CAP1203 */
 
 #define TOUCH_IC_NAME       "CAP1203"
@@ -220,6 +275,18 @@ static inline void touch_slider_on_change(touch_slider_cb_t callback) { (void)ca
 /* No LED drivers on this part: nothing to time out. */
 static inline bool touch_has_leds(void)     { return false; }
 static inline void touch_led_idle_timeout(uint32_t timeout_ms) { (void)timeout_ms; }
+
+static inline esp_err_t touch_read_button_deltas(int8_t delta[TOUCH_BUTTON_COUNT])
+{
+    return cap1203_read_deltas(delta);
+}
+
+static inline esp_err_t touch_read_button_thresholds(uint8_t threshold[TOUCH_BUTTON_COUNT])
+{
+    return cap1203_read_thresholds(threshold);
+}
+
+static inline esp_err_t touch_dump_registers(void) { return cap1203_dump_registers(); }
 
 #endif
 

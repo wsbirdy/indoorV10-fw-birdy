@@ -141,6 +141,14 @@ esp_err_t cap1166_read(uint8_t *pads);
 esp_err_t cap1166_read_deltas(int8_t delta[6]);
 
 /**
+ * @brief Read each pad's touch threshold, in the same units as the deltas: a
+ *        pad reads as touched once its delta count reaches this.
+ *
+ * @param threshold receives six values, CS1 first.
+ */
+esp_err_t cap1166_read_thresholds(uint8_t threshold[6]);
+
+/**
  * @brief Set touch sensitivity.
  *
  * Numbered exactly as the datasheet's DELTA_SENSE[2:0] field (table 5.7), so

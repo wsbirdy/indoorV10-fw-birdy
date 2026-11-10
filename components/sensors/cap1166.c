@@ -23,6 +23,7 @@ static const char *TAG = "cap1166";
 #define REG_INTERRUPT_ENABLE    0x27
 #define REG_REPEAT_RATE_ENABLE  0x28
 #define REG_MULTIPLE_TOUCH_CFG  0x2A
+#define REG_THRESHOLD_1         0x30    // ..0x35, one per pad
 #define REG_LED_LINKING         0x72
 #define REG_LED_POLARITY        0x73
 #define REG_LED_OUTPUT_CONTROL  0x74
@@ -452,6 +453,18 @@ esp_err_t cap1166_read_deltas(int8_t delta[6])
         ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_DELTA_COUNT_1 + i), &raw), TAG,
                             "delta %d read failed", i + 1);
         delta[i] = (int8_t)raw;     // two's complement, saturating at +127/-128
+    }
+    return ESP_OK;
+}
+
+esp_err_t cap1166_read_thresholds(uint8_t threshold[6])
+{
+    ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(threshold, ESP_ERR_INVALID_ARG, TAG, "NULL out pointer");
+
+    for (int i = 0; i < 6; i++) {
+        ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_THRESHOLD_1 + i), &threshold[i]), TAG,
+                            "threshold %d read failed", i + 1);
     }
     return ESP_OK;
 }

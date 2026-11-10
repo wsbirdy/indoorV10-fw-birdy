@@ -351,6 +351,32 @@ esp_err_t cap1203_read(uint8_t *pads)
     return ESP_OK;
 }
 
+esp_err_t cap1203_read_deltas(int8_t delta[3])
+{
+    ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(delta, ESP_ERR_INVALID_ARG, TAG, "NULL out pointer");
+
+    for (int i = 0; i < 3; i++) {
+        uint8_t raw = 0;
+        ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_DELTA_COUNT_1 + i), &raw), TAG,
+                            "delta %d read failed", i + 1);
+        delta[i] = (int8_t)raw;     // two's complement, saturating at +127/-128
+    }
+    return ESP_OK;
+}
+
+esp_err_t cap1203_read_thresholds(uint8_t threshold[3])
+{
+    ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(threshold, ESP_ERR_INVALID_ARG, TAG, "NULL out pointer");
+
+    for (int i = 0; i < 3; i++) {
+        ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_THRESHOLD_1 + i), &threshold[i]), TAG,
+                            "threshold %d read failed", i + 1);
+    }
+    return ESP_OK;
+}
+
 esp_err_t cap1203_set_sensitivity(uint8_t delta_sense)
 {
     ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
