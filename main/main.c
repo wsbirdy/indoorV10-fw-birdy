@@ -32,12 +32,20 @@ static const char *TAG = "main";
 #define REPORT_PERIOD_MS    5000
 
 /*
+ * How often the dashboard repaints with nobody touching the panel -- chosen
+ * from the menu, see REFRESH_RATES. A press always repaints at once.
+ *
  * Fast refresh drives the whole panel without the several flickers a full GC
  * waveform needs and finishes in about a second, which is what makes a 5 s
  * cadence possible at all. Every sixth update comes back as a full refresh:
- * the driver enforces the datasheet's EPAPER_MAX_FAST_REFRESHES limit itself.
+ * the driver enforces the datasheet's EPAPER_MAX_FAST_REFRESHES limit itself,
+ * so a slower rate also means fewer of those full-panel flashes.
+ *
+ * DISPLAY_TICK_MS is the fastest the loop ever runs on its own, and what it
+ * falls back to while something on screen has a deadline of its own (the
+ * Wi-Fi offer timing out), so a slow rate never strands it.
  */
-#define DISPLAY_PERIOD_MS   5000
+#define DISPLAY_TICK_MS     5000
 
 
 /* ----------------------------------------------------------------- UI state */
@@ -72,6 +80,7 @@ static struct {
     uint8_t          frontlight;    ///< index into FRONTLIGHT_LEVELS
 #endif
     uint8_t          pad_led;       ///< index into PAD_LED_TIMEOUTS
+    uint8_t          refresh;       ///< index into REFRESH_RATES
     ui_prompt_t      prompt;
     int64_t          prompt_since_us;
 } s_ui = {
@@ -81,6 +90,7 @@ static struct {
     .frontlight = 0,                // off until asked for; see apply_frontlight()
 #endif
     .pad_led = 2,                   // 15 s
+    .refresh = 0,                   // 5 s
 };
 
 
@@ -157,6 +167,29 @@ static void apply_pad_led_timeout(void)
 {
     touch_led_idle_timeout(PAD_LED_TIMEOUTS[s_ui.pad_led].timeout_ms);
 }
+
+
+/* ------------------------------------------------------------ refresh rate */
+
+/*
+ * The dashboard's repaint interval. The readings themselves are sampled on
+ * their own schedule regardless; this only decides how often the panel shows
+ * the latest of them. Slower is calmer to look at and wears the panel less.
+ */
+static const struct {
+    const char *name;
+    uint32_t    period_ms;
+} REFRESH_RATES[] = {
+    { "5 s",   5000 },
+    { "10 s",  10000 },
+    { "30 s",  30000 },
+    { "1 min", 60000 },
+};
+
+#define REFRESH_RATE_COUNT  (sizeof(REFRESH_RATES) / sizeof(REFRESH_RATES[0]))
+
+_Static_assert(DISPLAY_TICK_MS <= 5000,
+               "DISPLAY_TICK_MS must not be slower than the fastest refresh rate");
 
 
 /* ------------------------------------------------- LED bar brightness (slider) */
@@ -584,6 +617,7 @@ enum {
     MENU_THEME,
     MENU_UNITS,
     MENU_UPLOAD,
+    MENU_REFRESH_RATE,
     MENU_REFRESH,
     MENU_ABOUT,
     MENU_BACK,
@@ -668,6 +702,8 @@ static void fill_menu(display_values_t *v)
                                                 cloud_is_enabled()
                                                     ? (wifi_sta_is_online() ? "On" : "No link")
                                                     : "Off" };
+    v->rows[MENU_REFRESH_RATE] = (display_row_t){ "Refresh rate",
+                                                  REFRESH_RATES[s_ui.refresh].name };
     v->rows[MENU_REFRESH]    = (display_row_t){ "Full refresh", NULL };
     v->rows[MENU_ABOUT]      = (display_row_t){ "About",        NULL };
     v->rows[MENU_BACK]       = (display_row_t){ "Back",         NULL };
@@ -718,6 +754,13 @@ static void menu_activate(void)
         // Enabling posts immediately rather than at the end of the interval,
         // so the row's "On" is confirmed by a log line within a second or two.
         cloud_set_enabled(!cloud_is_enabled());
+        break;
+
+    case MENU_REFRESH_RATE:
+        // Cycles 5 s -> 10 s -> 30 s -> 1 min. Takes effect from the next wait,
+        // which starts as soon as this press has been painted.
+        s_ui.refresh = (uint8_t)((s_ui.refresh + 1) % REFRESH_RATE_COUNT);
+        ESP_LOGI(TAG, "dashboard refresh every %s", REFRESH_RATES[s_ui.refresh].name);
         break;
 
     case MENU_REFRESH:
@@ -783,9 +826,10 @@ static const char *clock_text(void)
 /* ------------------------------------------------------------ notifications */
 
 /*
- * How long a notification covers the readings grid. Three dashboard frames:
- * long enough to read after the hand has moved away, short enough that it is
- * gone by the time anyone looks again.
+ * How long a notification covers the readings grid: long enough to read after
+ * the hand has moved away, short enough that it is gone by the time anyone
+ * looks again. ui_wait_ms() wakes the loop when it runs out, so at a slow
+ * refresh rate it still leaves on time rather than at the next scheduled frame.
  */
 #define NOTIFY_MS  15000
 
@@ -910,6 +954,37 @@ static void apply_ui(display_values_t *v)
     }
 }
 
+/*
+ * How long ui_task may sleep before it has to repaint: the chosen refresh
+ * interval, cut short by anything on screen that is due to change sooner.
+ */
+static uint32_t ui_wait_ms(void)
+{
+    uint32_t wait_ms = REFRESH_RATES[s_ui.refresh].period_ms;
+
+    /*
+     * The offer has its own timeout and follows the link state, so while it is
+     * up -- or could still be made, see update_wifi_prompt() -- the loop keeps
+     * the base tick it always had rather than lingering for a minute. A board
+     * that came online never asks, and drops straight to the chosen rate.
+     */
+    const bool offer_pending = s_wifi_ready && !s_boot_ask_done && !wifi_sta_is_online();
+    if (s_ui.prompt != UI_PROMPT_NONE || offer_pending) {
+        wait_ms = DISPLAY_TICK_MS < wait_ms ? DISPLAY_TICK_MS : wait_ms;
+    }
+
+    // A notification leaves the moment it expires, not a frame later.
+    if (s_notify_since_us != 0) {
+        const int64_t left_ms =
+            NOTIFY_MS - (esp_timer_get_time() - s_notify_since_us) / 1000;
+        if (left_ms > 0 && (uint64_t)left_ms < wait_ms) {
+            wait_ms = (uint32_t)left_ms + 1;    // land just past the deadline
+        }
+    }
+
+    return wait_ms;
+}
+
 static void ui_task(void *arg)
 {
     while (1) {
@@ -920,7 +995,7 @@ static void ui_task(void *arg)
          * happens rather than being overwritten by an empty dashboard.
          */
         touch_event_t event;
-        const bool pressed = touch_event_wait(&event, DISPLAY_PERIOD_MS);
+        const bool pressed = touch_event_wait(&event, ui_wait_ms());
 
         if (pressed) {
             handle_event(event);
