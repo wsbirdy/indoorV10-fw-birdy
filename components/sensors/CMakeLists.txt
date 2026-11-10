@@ -7,6 +7,7 @@ idf_component_register(
                 "spl07.c"
                 "cap1203.c"
                 "cap1166.c"
+                "cap1133.c"
                 "pm.c"
                 "pms5003.c"
                 "sps30.c"
@@ -16,6 +17,6 @@ idf_component_register(
                 "senseair_s12.c"
     INCLUDE_DIRS "include"
     PRIV_REQUIRES peripherals
-                  esp_driver_gpio   # cap1166.c drives the touch panel's RESET line
+                  esp_driver_gpio   # touch drivers: ALERT# interrupt, CAP1166 RESET line
                   esp_timer
 )
