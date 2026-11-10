@@ -1,3 +1,4 @@
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_app_desc.h"
@@ -63,7 +64,9 @@ static struct {
     bool             led_on;
     bool             use_fahrenheit;
     bool             dark_theme;
+#if CONFIG_DISPLAY_FRONTLIGHT
     uint8_t          frontlight;    ///< index into FRONTLIGHT_LEVELS
+#endif
     uint8_t          pad_led;       ///< index into PAD_LED_TIMEOUTS
     ui_prompt_t      prompt;
     int64_t          prompt_since_us;
@@ -71,15 +74,20 @@ static struct {
     .screen = DISPLAY_SCREEN_HOME,
     .metric = DISPLAY_METRIC_PM25,
     .led_on = true,
+#if CONFIG_DISPLAY_FRONTLIGHT
     .frontlight = 0,                // off until asked for; see apply_frontlight()
+#endif
     .pad_led = 2,                   // 15 s
 };
 
 
 /* ------------------------------------------------------- frontlight (IO3) */
 
+#if CONFIG_DISPLAY_FRONTLIGHT
 /*
  * The panel's frontlight, driven by the LEDC channel pwm.c puts on GPIO 3.
+ * Only on the frontlit panel; the bare one (CONFIG_DISPLAY_FRONTLIGHT off) is
+ * the same glass and driver with nothing here to light.
  * E-paper holds its image with no power, so unlike the LED ring this is purely
  * a "can I read it right now" control -- it stays where it was left.
  *
@@ -119,6 +127,7 @@ static void apply_frontlight(void)
     ESP_LOGI(TAG, "frontlight %s (%.0f%% duty on gpio %d)",
              FRONTLIGHT_LEVELS[s_ui.frontlight].name, percent, PWM_GPIO);
 }
+#endif // CONFIG_DISPLAY_FRONTLIGHT
 
 
 /* ------------------------------------------------------------ pad LEDs */
@@ -571,7 +580,9 @@ static bool handle_prompt_button(touch_event_t event)
  */
 enum {
     MENU_LED,
+#if CONFIG_DISPLAY_FRONTLIGHT
     MENU_FRONTLIGHT,
+#endif
     MENU_PAD_LED,
     MENU_THEME,
     MENU_UNITS,
@@ -647,8 +658,10 @@ static void fill_menu(display_values_t *v)
     fill_led_row_value();
 
     v->rows[MENU_LED]        = (display_row_t){ "LED ring",     s_led_row_value };
+#if CONFIG_DISPLAY_FRONTLIGHT
     v->rows[MENU_FRONTLIGHT] = (display_row_t){ "Frontlight",
                                                 FRONTLIGHT_LEVELS[s_ui.frontlight].name };
+#endif
     v->rows[MENU_PAD_LED]    = (display_row_t){ "Pad LEDs",
                                                 touch_has_leds()
                                                     ? PAD_LED_TIMEOUTS[s_ui.pad_led].name
@@ -677,6 +690,7 @@ static void menu_activate(void)
         s_ui.led_on = !s_ui.led_on;
         break;
 
+#if CONFIG_DISPLAY_FRONTLIGHT
     case MENU_FRONTLIGHT:
         // Cycles Off -> Low -> Med -> High -> Off, applied immediately so the
         // pad press is confirmed by the panel getting brighter under your hand
@@ -684,6 +698,7 @@ static void menu_activate(void)
         s_ui.frontlight = (uint8_t)((s_ui.frontlight + 1) % FRONTLIGHT_LEVEL_COUNT);
         apply_frontlight();
         break;
+#endif
 
     case MENU_PAD_LED:
         // Cycles Always on -> 5 s -> 15 s -> 30 s. A part without LEDs keeps
@@ -905,7 +920,11 @@ void app_main(void)
     // pwm_init() leaves the channel at 0% duty, which is already "off"; going
     // through apply_frontlight() puts the saved level on the pin and logs it,
     // so the boot log says what GPIO 3 is doing rather than leaving it implied.
+#if CONFIG_DISPLAY_FRONTLIGHT
     apply_frontlight();
+#else
+    ESP_LOGI(TAG, "no frontlight on this panel; gpio %d held low", PWM_GPIO);
+#endif
 
     ESP_ERROR_CHECK(air_monitor_init());
 

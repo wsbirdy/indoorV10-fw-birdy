@@ -1,0 +1,15 @@
+menu "Display panel"
+
+    config DISPLAY_FRONTLIGHT
+        bool "Panel has a frontlight"
+        default y
+        help
+            The GDEY0213B74 is fitted either bare or with a frontlight layer
+            on top. The glass and the SSD1680 behind it are identical, so the
+            panel driver is the same either way; this only decides whether
+            the firmware offers a light to turn on.
+
+            Turn this off for the bare panel: the Frontlight row leaves the
+            menu, and GPIO 3 (the frontlight PWM) is held low at 0% duty.
+
+endmenu
