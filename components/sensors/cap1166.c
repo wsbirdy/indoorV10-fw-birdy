@@ -26,6 +26,7 @@ static const char *TAG = "cap1166";
 #define REG_LED_LINKING         0x72
 #define REG_LED_POLARITY        0x73
 #define REG_LED_OUTPUT_CONTROL  0x74
+#define REG_LED_DIRECT_DUTY     0x93
 #define REG_PRODUCT_ID          0xFD
 #define REG_MANUFACTURER_ID     0xFE
 #define REG_REVISION            0xFF
@@ -100,6 +101,16 @@ static const char *TAG = "cap1166";
  * polarity -- so it is deliberately not blocked.
  */
 #define LED_POLARITY_NON_INVERTED   CAP1166_PADS_ALL
+
+/*
+ * LED Direct Duty Cycle: max 100% (MAX_DUTY[7:4] = Fh), min 0% (MIN_DUTY[3:0]
+ * = 0h). Through the polarity table above, the min duty sets how bright an
+ * idle pad is (100 - 0 = full brightness) and the max duty how dark a touched
+ * or switched-off one is (100 - 100 = off). This is the reset value, but it is
+ * written anyway: the MCU does not drive RESET, so after a soft reboot the
+ * part keeps whatever was last written here rather than its defaults.
+ */
+#define LED_DIRECT_DUTY_FULL        0xF0
 
 /*
  * Averaging and sampling: 4 samples per channel on a 35 ms cycle
@@ -387,12 +398,16 @@ esp_err_t cap1166_init(void)
                                                   LED_POLARITY_NON_INVERTED)),
                         TAG, "led polarity failed");
 
+    // Full brightness when lit, fully dark when not. See LED_DIRECT_DUTY_FULL.
+    ESP_RETURN_ON_ERROR(detach_on_error(reg_write(REG_LED_DIRECT_DUTY,
+                                                  LED_DIRECT_DUTY_FULL)),
+                        TAG, "led duty failed");
+
     /*
      * The rest of the LED block stays at its reset values, which already say
      * what this board wants: open-drain outputs (71h) sinking through the LEDs
-     * tied to +3.3V, Direct behaviour (81h/82h) so a pad simply switches its
-     * LED rather than pulsing or breathing it, and a 0-100% direct duty cycle
-     * (93h), which is what puts the two states at fully on and fully off.
+     * tied to +3.3V, and Direct behaviour (81h/82h) so a pad simply switches
+     * its LED rather than pulsing or breathing it.
      */
 
     // Maximum gain. The pads are read through the enclosure wall, so the
