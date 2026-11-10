@@ -20,12 +20,14 @@ static const char *TAG = "cap1133";
 /* Register addresses, CAP1133 datasheet table 5.1. */
 #define REG_MAIN_CONTROL        0x00
 #define REG_SENSOR_INPUT_STATUS 0x03
+#define REG_DELTA_COUNT_1       0x10    // ..0x12, one per pad, two's complement
 #define REG_SENSITIVITY         0x1F
 #define REG_SENSOR_ENABLE       0x21
 #define REG_AVG_AND_SAMPLING    0x24
 #define REG_INTERRUPT_ENABLE    0x27
 #define REG_REPEAT_RATE_ENABLE  0x28
 #define REG_MULTIPLE_TOUCH_CFG  0x2A
+#define REG_THRESHOLD_1         0x30    // ..0x32, one per pad
 #define REG_LED_LINKING         0x72
 #define REG_LED_POLARITY        0x73
 #define REG_LED_OUTPUT_CONTROL  0x74
@@ -285,6 +287,32 @@ esp_err_t cap1133_read(uint8_t *pads)
                             "clear int failed");
     }
 
+    return ESP_OK;
+}
+
+esp_err_t cap1133_read_deltas(int8_t delta[3])
+{
+    ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(delta, ESP_ERR_INVALID_ARG, TAG, "NULL out pointer");
+
+    for (int i = 0; i < 3; i++) {
+        uint8_t raw = 0;
+        ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_DELTA_COUNT_1 + i), &raw), TAG,
+                            "delta %d read failed", i + 1);
+        delta[i] = (int8_t)raw;     // two's complement, saturating at +127/-128
+    }
+    return ESP_OK;
+}
+
+esp_err_t cap1133_read_thresholds(uint8_t threshold[3])
+{
+    ESP_RETURN_ON_FALSE(s_dev, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(threshold, ESP_ERR_INVALID_ARG, TAG, "NULL out pointer");
+
+    for (int i = 0; i < 3; i++) {
+        ESP_RETURN_ON_ERROR(reg_read((uint8_t)(REG_THRESHOLD_1 + i), &threshold[i]), TAG,
+                            "threshold %d read failed", i + 1);
+    }
     return ESP_OK;
 }
 

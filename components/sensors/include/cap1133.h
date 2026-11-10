@@ -72,6 +72,22 @@ esp_err_t cap1133_init(void);
 esp_err_t cap1133_read(uint8_t *pads);
 
 /**
+ * @brief Read each pad's delta count: its signed distance from the calibrated
+ *        "not touched" reference. A pad reads as touched once this reaches
+ *        its threshold. Saturates at +127.
+ *
+ * @param delta receives three counts, CS1 first.
+ */
+esp_err_t cap1133_read_deltas(int8_t delta[3]);
+
+/**
+ * @brief Read each pad's touch threshold, in the same units as the deltas.
+ *
+ * @param threshold receives three values, CS1 first.
+ */
+esp_err_t cap1133_read_thresholds(uint8_t threshold[3]);
+
+/**
  * @brief Set touch sensitivity, numbered as the datasheet's DELTA_SENSE[2:0]
  *        field (table 5.8): 0 = 128x (most sensitive) .. 7 = 1x. Power-on
  *        default is 2 (32x).
