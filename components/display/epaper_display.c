@@ -31,19 +31,26 @@ static const char *TAG = "epaper_display";
 
 /* --- Layout (landscape canvas, GFX_W x GFX_H = 250 x 122) -----------------
  *
- *   +--------------------------------------------------------------+
- *   | AIR QUALITY                                                ! |  title
- *   +----------------------+---------------------------------------+
- *   | PM2.5 ug/m3          |  CO2                          850 ppm |
- *   |         123          |  TEMP                          24.5 C |
- *   |      UNHEALTHY       |  HUMID                         55.0 % |
- *   |       AQI 185        |  VOC                            31000 |
- *   |----------------------|  NOX                            16000 |
- *   | PM1.0          98 ug |  PRESS                     1013.2 hPa |
- *   | PM10          141 ug |  ALT                             45 m |
- *   +--------------------------------------------------------------+
- *   | offline: PMS CO2                                             |  footer
- *   +--------------------------------------------------------------+
+ *   +##############################################################+
+ *   |#SENSORS OK#############02 NOV 18:00##################NO WIFI#|    2  top bar
+ *   +##############################+###############################+   11
+ *   | PM2.5                  ug/m3 | CO2                       ppm |   15
+ *   |             35               |            1240               |   25  scale 5
+ *   |       MODERATE  AQI 99       |            POOR               |   63
+ *   +#####CLIMATE#########+#######GASES#######+#####PRESSURE#######+   74
+ *   | TEMP         24.5C  | VOC         31000 |       1013         |   93
+ *   | HUMID          55%  | NOX         16000 |        hPa         |  107
+ *   +---------------------+-------------------+--------------------+
+ *
+ * PM2.5 and CO2 are the two readings that say whether the room needs
+ * attention, so they get the large figures. Everything else is grouped
+ * underneath, each group under its own inverted header: climate, gases, and
+ * pressure on its own, which gives it room to be the one secondary figure
+ * drawn at double size. Sensor health sits at the left of the top line.
+ *
+ * A snackbar is a notification, not a footer: while one is up it is drawn as a
+ * solid block over the whole grid, and the grid comes back when the caller
+ * stops sending it. The headline figures stay visible underneath it.
  *
  * The reference splits the panel into a frozen header and a body band so a
  * partial refresh can redraw the body alone. That split does not survive the
@@ -53,18 +60,32 @@ static const char *TAG = "epaper_display";
  * cover the whole canvas instead -- still differential, still no flash, they
  * just carry every changed pixel rather than a chosen band.
  */
-#define STATUS_H        13
+#define STATUS_H        13      // menu title strip
 #define MARGIN_X        2
 
-#define COL_L_X         MARGIN_X
-#define COL_L_RIGHT     120
-#define DIVIDER_X       124
-#define COL_R_X         130
-#define COL_R_RIGHT     (GFX_W - MARGIN_X)
+/* The two headline halves, either side of a one-pixel divider. */
+#define HALF_DIVIDER_X  124
+#define HALF_L_LEFT     MARGIN_X
+#define HALF_L_RIGHT    (HALF_DIVIDER_X - 3)
+#define HALF_R_LEFT     (HALF_DIVIDER_X + 3)
+#define HALF_R_RIGHT    (GFX_W - MARGIN_X)
+
+#define TOP_Y           2       // clock and link status
+#define TOP_RULE_Y      11      // bottom row of the top bar
+
+#define HERO_LABEL_Y    15
+#define HERO_VALUE_Y    25
+#define HERO_SCALE      5       // 35 px tall; "1240" is 116 px, inside a half
+#define HERO_BAND_Y     63
+#define HERO_RULE_Y     74
+
+#define GROUP_HEAD_H    13      // inverted header strip, from HERO_RULE_Y
+#define GROUP_ROW1_Y    (HERO_RULE_Y + 19)
+#define GROUP_ROW2_Y    (HERO_RULE_Y + 33)
+#define GROUP_PAD       4       // text inset from a group's edges
 
 #define ROW_PITCH       13
 #define LINE_PITCH      10
-#define FOOTER_Y        (GFX_H - GFX_FONT_H - 3)
 
 /** Characters that fit on one scale-1 line inside the margins. */
 #define WRAP_COLS       ((GFX_W - 2 * MARGIN_X) / GFX_ADVANCE)
@@ -115,15 +136,6 @@ static bool has_temp(float v)   { return v != DISPLAY_INVALID_TEMPERATURE; }
 static bool has_hum(float v)    { return v != DISPLAY_INVALID_HUMIDITY; }
 static bool has_gas(int v)      { return v != DISPLAY_INVALID_TVOC; }
 static bool has_press(float v)  { return v != DISPLAY_INVALID_PRESSURE; }
-static bool has_alt(float v)    { return v != DISPLAY_INVALID_ALTITUDE; }
-
-/** True when at least one sensor group has nothing to show. */
-static bool any_sensor_offline(const display_values_t *v)
-{
-    return !has_pm(v->pm25_ugm3) || !has_co2(v->co2_ppm) || !has_temp(v->temperature_c) ||
-           !has_gas(v->tvoc_raw) || !has_press(v->pressure_hpa);
-}
-
 /* ======================================================================
  * Drawing
  * ====================================================================== */
@@ -135,29 +147,39 @@ static void draw_text_between(int left, int right, int y, const char *s, int sca
     gfx_text(s_render_buf, x, y, s, scale, black);
 }
 
-/*
- * The highlight is an inverted band: fill black, then draw the text white.
- * gfx's `black` argument is the ink, so every call inside a band passes !hl.
- */
-static void highlight_band(int left, int right, int y, int h)
-{
-    gfx_fill_rect(s_render_buf, left - 2, y, (right - left) + 4, h, true);
-}
-
 /** One label/value line inside a column: label left, value flushed right. */
-static int draw_row(int left, int right, int y, const char *label, const char *value, bool hl)
+static void draw_row(int left, int right, int y, const char *label, const char *value)
 {
-    if (hl) {
-        highlight_band(left, right, y - 3, ROW_PITCH);
-    }
-    gfx_text(s_render_buf, left, y, label, 1, !hl);
-    gfx_text_right(s_render_buf, right, y, value, 1, !hl);
-    return y + ROW_PITCH;
+    gfx_text(s_render_buf, left, y, label, 1, true);
+    gfx_text_right(s_render_buf, right, y, value, 1, true);
 }
 
-/** Same, but prints "--" when the reading is absent. */
-static int draw_row_fmt(int left, int right, int y, const char *label, bool present, bool hl,
-                        const char *fmt, ...)
+/*
+ * The three groups under the headline, separated by one-pixel rules at their
+ * shared edges. Not even thirds: Climate needs the most room ("HUMID 100%",
+ * "TEMP 104.0F") and Pressure the least.
+ */
+static const struct { int left, right; } GROUPS[] = {
+    { 0,   83 },
+    { 83,  166 },
+    { 166, GFX_W },
+};
+
+#define GROUP_COUNT     (sizeof(GROUPS) / sizeof(GROUPS[0]))
+
+/** A group's header: its name white on black, across the group's full width. */
+static void draw_group_head(unsigned group, const char *title)
+{
+    const int left = GROUPS[group].left;
+    const int right = GROUPS[group].right;
+
+    gfx_fill_rect(s_render_buf, left, HERO_RULE_Y, right - left, GROUP_HEAD_H, true);
+    draw_text_between(left, right, HERO_RULE_Y + 3, title, 1, false);
+}
+
+/** One label/value line inside a group; "--" when the reading is absent. */
+static void draw_group_row(unsigned group, int y, const char *label, bool present,
+                           const char *fmt, ...)
 {
     char value[16] = "--";
 
@@ -168,110 +190,200 @@ static int draw_row_fmt(int left, int right, int y, const char *label, bool pres
         va_end(args);
     }
 
-    return draw_row(left, right, y, label, value, hl);
-}
-
-display_metric_t display_metric_next(display_metric_t from, int delta)
-{
-    const int span = DISPLAY_METRIC_COUNT - 1;  // the cycle excludes NONE
-    int index = (int)from - 1;                  // NONE lands on -1
-
-    if (delta >= 0) {
-        index = (index + 1) % span;
-    } else {
-        index = (index <= 0) ? (span - 1) : (index - 1);
-    }
-
-    return (display_metric_t)(index + 1);
+    draw_row(GROUPS[group].left + GROUP_PAD, GROUPS[group].right - GROUP_PAD, y,
+             label, value);
 }
 
 /*
- * Title bar: white on black, with a marker on the right when something is not
- * reporting -- the one glance that says the numbers below are incomplete.
+ * CO2 has no official index the way PM2.5 has the EPA AQI. These are
+ * ventilation bands: 1000 ppm is the usual "open a window" line. Adjust here.
  */
-static void draw_status_bar(const display_values_t *v)
+static const char *co2_band_name(int ppm)
 {
-    gfx_fill_rect(s_render_buf, 0, 0, GFX_W, STATUS_H, true);
-    gfx_text(s_render_buf, MARGIN_X + 2, 3, "AIR QUALITY", 1, false);
-
-    if (any_sensor_offline(v)) {
-        gfx_text_right(s_render_buf, GFX_W - MARGIN_X - 2, 3, "!", 1, false);
+    if (ppm < 800) {
+        return "GOOD";
+    } else if (ppm < 1000) {
+        return "MODERATE";
+    } else if (ppm < 1500) {
+        return "POOR";
     }
+    return "BAD";
 }
 
-/** Left column: the PM2.5 headline, the AQI band it maps to, and the other
- *  two particle sizes underneath. */
-static void draw_headline(const display_values_t *v)
+/**
+ * @brief One headline half: label and unit on top, the figure large in the
+ *        middle, its band word underneath.
+ */
+static void draw_hero(int left, int right, const char *label, const char *unit,
+                      const char *value, const char *band)
 {
-    char buf[24];
+    gfx_text(s_render_buf, left, HERO_LABEL_Y, label, 1, true);
+    gfx_text_right(s_render_buf, right, HERO_LABEL_Y, unit, 1, true);
 
-    /* The headline is a block, not a row, so its highlight covers the whole
-     * upper half of the column rather than one line of text. */
-    const bool hl = (v->highlight == DISPLAY_METRIC_PM25);
-    if (hl) {
-        highlight_band(COL_L_X, COL_L_RIGHT, STATUS_H + 1, 60);
+    /* A five-digit CO2 reading is 146 px at full size: step down rather than
+     * clip, and keep the smaller figure centred on the same line. */
+    int scale = HERO_SCALE;
+    while (scale > 1 && gfx_text_width(value, scale) > right - left) {
+        scale--;
+    }
+    const int y = HERO_VALUE_Y + GFX_FONT_H * (HERO_SCALE - scale) / 2;
+    draw_text_between(left, right, y, value, scale, true);
+
+    draw_text_between(left, right, HERO_BAND_Y, band, 1, true);
+}
+
+static void draw_pm25(const display_values_t *v)
+{
+    if (!has_pm(v->pm25_ugm3)) {
+        draw_hero(HALF_L_LEFT, HALF_L_RIGHT, "PM2.5", "ug/m3", "--", "NO DATA");
+        return;
     }
 
-    gfx_text(s_render_buf, COL_L_X, 17, "PM2.5 ug/m3", 1, !hl);
+    const int aqi = aqi_from_pm25(v->pm25_ugm3);
+    const char *name = aqi_category_name(aqi_category(aqi));
+    char value[12];
+    char band[32];
 
-    if (has_pm(v->pm25_ugm3)) {
-        const int aqi = aqi_from_pm25(v->pm25_ugm3);
+    snprintf(value, sizeof(value), "%.0f", v->pm25_ugm3);
 
-        snprintf(buf, sizeof(buf), "%.0f", v->pm25_ugm3);
-        draw_text_between(COL_L_X, COL_L_RIGHT, 28, buf, 3, !hl);
+    /* "SENSITIVE GRP  AQI 150" overruns the half; the bare number does not. */
+    snprintf(band, sizeof(band), "%s  AQI %d", name, aqi);
+    if (gfx_text_width(band, 1) > HALF_L_RIGHT - HALF_L_LEFT) {
+        snprintf(band, sizeof(band), "%s %d", name, aqi);
+    }
 
-        draw_text_between(COL_L_X, COL_L_RIGHT, 53, aqi_category_name(aqi_category(aqi)), 1, !hl);
+    draw_hero(HALF_L_LEFT, HALF_L_RIGHT, "PM2.5", "ug/m3", value, band);
+}
 
-        snprintf(buf, sizeof(buf), "AQI %d", aqi);
-        draw_text_between(COL_L_X, COL_L_RIGHT, 64, buf, 1, !hl);
+static void draw_co2(const display_values_t *v)
+{
+    if (!has_co2(v->co2_ppm)) {
+        draw_hero(HALF_R_LEFT, HALF_R_RIGHT, "CO2", "ppm", "--", "NO DATA");
+        return;
+    }
+
+    char value[12];
+    snprintf(value, sizeof(value), "%d", v->co2_ppm);
+    draw_hero(HALF_R_LEFT, HALF_R_RIGHT, "CO2", "ppm", value, co2_band_name(v->co2_ppm));
+}
+
+/*
+ * Left end of the top line: "SENSORS OK", the one sensor that is not
+ * reporting ("SGP OFF"), or how many are not -- the one glance that says a
+ * "--" below is a fault rather than a reading.
+ */
+static void format_sensor_status(const display_values_t *v, char *buf, size_t len)
+{
+    const struct { bool ok; const char *name; } sensors[] = {
+        { has_pm(v->pm25_ugm3),       "PMS" },
+        { has_co2(v->co2_ppm),        "CO2" },
+        { has_temp(v->temperature_c), "SHT" },
+        { has_gas(v->tvoc_raw),       "SGP" },
+        { has_press(v->pressure_hpa), "SPL" },
+    };
+
+    unsigned offline = 0;
+    const char *name = NULL;
+
+    for (unsigned i = 0; i < sizeof(sensors) / sizeof(sensors[0]); i++) {
+        if (!sensors[i].ok) {
+            offline++;
+            name = sensors[i].name;
+        }
+    }
+
+    if (offline == 0) {
+        snprintf(buf, len, "SENSORS OK");
+    } else if (offline == 1) {
+        snprintf(buf, len, "%s OFF", name);
     } else {
-        draw_text_between(COL_L_X, COL_L_RIGHT, 28, "--", 3, !hl);
-        draw_text_between(COL_L_X, COL_L_RIGHT, 64, "NO DATA", 1, !hl);
+        snprintf(buf, len, "%u SENSORS OFF", offline);
     }
-
-    gfx_hline(s_render_buf, COL_L_X, 75, COL_L_RIGHT - COL_L_X, true);
-
-    int y = 79;
-    y = draw_row_fmt(COL_L_X, COL_L_RIGHT, y, "PM1.0", has_pm(v->pm1_ugm3),
-                     v->highlight == DISPLAY_METRIC_PM1, "%.0f ug", v->pm1_ugm3);
-    y = draw_row_fmt(COL_L_X, COL_L_RIGHT, y, "PM10", has_pm(v->pm10_ugm3),
-                     v->highlight == DISPLAY_METRIC_PM10, "%.0f ug", v->pm10_ugm3);
 }
 
-/** Right column: everything that is not a particle count. */
-static void draw_readings(const display_values_t *v)
+static void draw_climate(const display_values_t *v)
 {
-    int y = 17;
-
-    y = draw_row_fmt(COL_R_X, COL_R_RIGHT, y, "CO2", has_co2(v->co2_ppm),
-                     v->highlight == DISPLAY_METRIC_CO2, "%d ppm", v->co2_ppm);
-
     /* The stored reading is always Celsius; only the presentation changes. */
     const float temp = v->use_fahrenheit ? (v->temperature_c * 9.0f / 5.0f + 32.0f)
                                          : v->temperature_c;
-    y = draw_row_fmt(COL_R_X, COL_R_RIGHT, y, "TEMP", has_temp(v->temperature_c),
-                     v->highlight == DISPLAY_METRIC_TEMP,
-                     v->use_fahrenheit ? "%.1f F" : "%.1f C", temp);
 
-    y = draw_row_fmt(COL_R_X, COL_R_RIGHT, y, "HUMID", has_hum(v->humidity_pct),
-                     v->highlight == DISPLAY_METRIC_HUMIDITY, "%.1f %%", v->humidity_pct);
+    draw_group_head(0, "CLIMATE");
+    draw_group_row(0, GROUP_ROW1_Y, "TEMP", has_temp(v->temperature_c),
+                   v->use_fahrenheit ? "%.1fF" : "%.1fC", temp);
+    draw_group_row(0, GROUP_ROW2_Y, "HUMID", has_hum(v->humidity_pct), "%.0f%%", v->humidity_pct);
+}
+
+static void draw_gases(const display_values_t *v)
+{
+    draw_group_head(1, "GASES");
 
     if (v->tvoc_conditioning) {
-        y = draw_row(COL_R_X, COL_R_RIGHT, y, "VOC", "warmup",
-                     v->highlight == DISPLAY_METRIC_TVOC);
-        y = draw_row(COL_R_X, COL_R_RIGHT, y, "NOX", "warmup",
-                     v->highlight == DISPLAY_METRIC_NOX);
+        draw_group_row(1, GROUP_ROW1_Y, "VOC", true, "warmup");
+        draw_group_row(1, GROUP_ROW2_Y, "NOX", true, "warmup");
     } else {
-        y = draw_row_fmt(COL_R_X, COL_R_RIGHT, y, "VOC", has_gas(v->tvoc_raw),
-                         v->highlight == DISPLAY_METRIC_TVOC, "%d", v->tvoc_raw);
-        y = draw_row_fmt(COL_R_X, COL_R_RIGHT, y, "NOX", has_gas(v->nox_raw),
-                         v->highlight == DISPLAY_METRIC_NOX, "%d", v->nox_raw);
+        draw_group_row(1, GROUP_ROW1_Y, "VOC", has_gas(v->tvoc_raw), "%d", v->tvoc_raw);
+        draw_group_row(1, GROUP_ROW2_Y, "NOX", has_gas(v->nox_raw), "%d", v->nox_raw);
     }
+}
 
-    y = draw_row_fmt(COL_R_X, COL_R_RIGHT, y, "PRESS", has_press(v->pressure_hpa),
-                     v->highlight == DISPLAY_METRIC_PRESSURE, "%.1f hPa", v->pressure_hpa);
-    y = draw_row_fmt(COL_R_X, COL_R_RIGHT, y, "ALT", has_alt(v->altitude_m),
-                     v->highlight == DISPLAY_METRIC_ALTITUDE, "%.0f m", v->altitude_m);
+/* A single reading, so it is drawn as a figure rather than a label/value row. */
+static void draw_pressure(const display_values_t *v)
+{
+    const int left = GROUPS[2].left + GROUP_PAD;
+    const int right = GROUPS[2].right - GROUP_PAD;
+
+    draw_group_head(2, "PRESSURE");
+
+    char value[12] = "--";
+    if (has_press(v->pressure_hpa)) {
+        snprintf(value, sizeof(value), "%.0f", v->pressure_hpa);
+    }
+    draw_text_between(left, right, GROUP_ROW1_Y - 1, value, 2, true);
+    draw_text_between(left, right, GROUP_ROW2_Y + 1, "hPa", 1, true);
+}
+
+static void draw_groups(const display_values_t *v)
+{
+    draw_climate(v);
+    draw_gases(v);
+    draw_pressure(v);
+
+    for (unsigned g = 1; g < GROUP_COUNT; g++) {
+        gfx_fill_rect(s_render_buf, GROUPS[g].left, HERO_RULE_Y, 1, GFX_H - HERO_RULE_Y, true);
+    }
+}
+
+/*
+ * Top bar, white on black: sensor health left, the clock centred, the link
+ * status right. Solid, like the group headers, so the frame reads as one
+ * style; its bottom edge doubles as the rule above the headline.
+ */
+static void draw_top_line(const display_values_t *v)
+{
+    gfx_fill_rect(s_render_buf, 0, 0, GFX_W, TOP_RULE_Y + 1, true);
+
+    char status[16];
+    format_sensor_status(v, status, sizeof(status));
+    gfx_text(s_render_buf, MARGIN_X + 2, TOP_Y, status, 1, false);
+
+    if (v->clock_text != NULL) {
+        gfx_text_center(s_render_buf, TOP_Y, v->clock_text, 1, false);
+    }
+    if (v->status_text != NULL) {
+        gfx_text_right(s_render_buf, GFX_W - MARGIN_X - 2, TOP_Y, v->status_text, 1, false);
+    }
+}
+
+static void draw_dashboard(const display_values_t *v)
+{
+    draw_top_line(v);
+    draw_pm25(v);
+    draw_co2(v);
+
+    gfx_fill_rect(s_render_buf, HALF_DIVIDER_X, TOP_RULE_Y, 1, HERO_RULE_Y - TOP_RULE_Y, true);
+    gfx_hline(s_render_buf, 0, HERO_RULE_Y, GFX_W, true);
+
+    draw_groups(v);
 }
 
 /** First menu row's text baseline-top, just under the title strip. */
@@ -346,47 +458,24 @@ static void draw_menu(const display_values_t *v)
 }
 
 /*
- * Bottom strip. The snackbar owns it when there is one; otherwise it names
- * whatever is not reporting, so a row of dashes is explainable. All five names
- * is 19 characters, which the landscape width swallows on one line.
+ * The notification: a solid block over everything below the headline, with the
+ * text centred in it. Double size when it fits on one line (20 characters),
+ * which a short "LED bar 45%" does; longer text drops to the normal size.
  */
-static void draw_footer(const display_values_t *v)
+static void draw_snackbar(const display_values_t *v)
 {
-    if (v->snackbar_text != NULL && v->snackbar_text[0] != '\0') {
-        gfx_fill_rect(s_render_buf, 0, FOOTER_Y - 3, GFX_W, GFX_FONT_H + 6, true);
-        gfx_text_center(s_render_buf, FOOTER_Y, v->snackbar_text, 1, false);
+    if (v->snackbar_text == NULL || v->snackbar_text[0] == '\0') {
         return;
     }
 
-    const struct { bool ok; const char *name; } sensors[] = {
-        { has_pm(v->pm25_ugm3),       "PMS" },
-        { has_co2(v->co2_ppm),        "CO2" },
-        { has_temp(v->temperature_c), "SHT" },
-        { has_gas(v->tvoc_raw),       "SGP" },
-        { has_press(v->pressure_hpa), "SPL" },
-    };
+    // One white line under the rule keeps the block visibly a layer on top
+    // rather than part of the layout.
+    const int top = HERO_RULE_Y + 2;
+    gfx_fill_rect(s_render_buf, 0, top, GFX_W, GFX_H - top, true);
 
-    char buf[40];
-    size_t used = 0;
-
-    for (unsigned i = 0; i < sizeof(sensors) / sizeof(sensors[0]); i++) {
-        if (sensors[i].ok || used + 4 >= sizeof(buf)) {
-            continue;
-        }
-        memcpy(&buf[used], sensors[i].name, 3);
-        used += 3;
-        buf[used++] = ' ';
-    }
-    buf[used] = '\0';
-
-    gfx_hline(s_render_buf, 0, FOOTER_Y - 4, GFX_W, true);
-
-    if (used == 0) {
-        gfx_text(s_render_buf, COL_L_X, FOOTER_Y, "all sensors ok", 1, true);
-    } else {
-        const int x = gfx_text(s_render_buf, COL_L_X, FOOTER_Y, "offline: ", 1, true);
-        gfx_text(s_render_buf, x, FOOTER_Y, buf, 1, true);
-    }
+    const int scale = (gfx_text_width(v->snackbar_text, 2) <= GFX_W - 2 * MARGIN_X) ? 2 : 1;
+    const int y = top + (GFX_H - top - GFX_FONT_H * scale) / 2;
+    gfx_text_center(s_render_buf, y, v->snackbar_text, scale, false);
 }
 
 /*
@@ -451,11 +540,8 @@ static void render_frame(const display_values_t *v)
     } else if (v->screen == DISPLAY_SCREEN_MENU) {
         draw_menu(v);
     } else {
-        draw_status_bar(v);
-        draw_headline(v);
-        draw_readings(v);
-        gfx_fill_rect(s_render_buf, DIVIDER_X, STATUS_H + 3, 1, FOOTER_Y - STATUS_H - 10, true);
-        draw_footer(v);
+        draw_dashboard(v);
+        draw_snackbar(v);
     }
 
     /*

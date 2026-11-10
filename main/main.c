@@ -1,9 +1,14 @@
+#include <ctype.h>
+#include <stdlib.h>
+#include <time.h>
+
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_netif_sntp.h"
 
 #include "i2c.h"
 #include "uart.h"
@@ -59,7 +64,6 @@ typedef enum {
  */
 static struct {
     display_screen_t screen;
-    display_metric_t metric;
     uint8_t          menu_row;
     bool             led_on;
     bool             use_fahrenheit;
@@ -72,7 +76,6 @@ static struct {
     int64_t          prompt_since_us;
 } s_ui = {
     .screen = DISPLAY_SCREEN_HOME,
-    .metric = DISPLAY_METRIC_PM25,
     .led_on = true,
 #if CONFIG_DISPLAY_FRONTLIGHT
     .frontlight = 0,                // off until asked for; see apply_frontlight()
@@ -388,16 +391,11 @@ static void snapshot_values(const air_monitor_device *dev, display_values_t *v)
     display_values_reset(v);
 
     if (dev->pm_valid) {
-        // Field by field: the bound part decides which of these it actually
-        // measured, and one it did not stays at its "--" sentinel.
-        if (pm_has(&dev->pm, PM_FIELD_PM1_0)) {
-            v->pm1_ugm3 = dev->pm.pm1_0_ugm3;
-        }
+        // The bound part decides whether it measured PM2.5 at all; one that
+        // did not leaves the headline at its "--" sentinel. PM1.0 and PM10
+        // are logged and uploaded but not shown.
         if (pm_has(&dev->pm, PM_FIELD_PM2_5)) {
             v->pm25_ugm3 = dev->pm.pm2_5_ugm3;
-        }
-        if (pm_has(&dev->pm, PM_FIELD_PM10)) {
-            v->pm10_ugm3 = dev->pm.pm10_ugm3;
         }
     }
     if (dev->co2_valid) {
@@ -415,7 +413,6 @@ static void snapshot_values(const air_monitor_device *dev, display_values_t *v)
 
     if (dev->spl07_valid) {
         v->pressure_hpa = dev->pressure_pa / 100.0f;
-        v->altitude_m   = dev->altitude_m;
     }
 }
 
@@ -572,11 +569,11 @@ static bool handle_prompt_button(touch_event_t event)
 
 /*
  * Three buttons, so the usual three-key idiom: left and right move, enter acts.
- * On the dashboard that means walking the highlight along the readings; in the
- * menu it means walking the rows.
+ * That applies to the menu's rows. The dashboard has nothing to move between,
+ * so there only enter does anything: it opens the menu.
  *
  * The slider is not part of this. It is a direct control for one setting, not
- * a fourth key, so it never moves a highlight or opens anything.
+ * a fourth key, so it never moves a cursor or opens anything.
  */
 enum {
     MENU_LED,
@@ -586,7 +583,6 @@ enum {
     MENU_PAD_LED,
     MENU_THEME,
     MENU_UNITS,
-    MENU_HIGHLIGHT,
     MENU_UPLOAD,
     MENU_REFRESH,
     MENU_ABOUT,
@@ -668,8 +664,6 @@ static void fill_menu(display_values_t *v)
                                                     : "None" };
     v->rows[MENU_THEME]      = (display_row_t){ "Theme",        s_ui.dark_theme ? "Dark" : "Light" };
     v->rows[MENU_UNITS]      = (display_row_t){ "Temperature",  s_ui.use_fahrenheit ? "F" : "C" };
-    v->rows[MENU_HIGHLIGHT]  = (display_row_t){ "Highlight",
-                                                s_ui.metric == DISPLAY_METRIC_NONE ? "Off" : "On" };
     v->rows[MENU_UPLOAD]     = (display_row_t){ "Upload",
                                                 cloud_is_enabled()
                                                     ? (wifi_sta_is_online() ? "On" : "No link")
@@ -720,13 +714,6 @@ static void menu_activate(void)
         s_ui.use_fahrenheit = !s_ui.use_fahrenheit;
         break;
 
-    case MENU_HIGHLIGHT:
-        // Toggling off parks the metric; toggling on restores the headline,
-        // which is where the left/right walk naturally starts.
-        s_ui.metric = (s_ui.metric == DISPLAY_METRIC_NONE) ? DISPLAY_METRIC_PM25
-                                                           : DISPLAY_METRIC_NONE;
-        break;
-
     case MENU_UPLOAD:
         // Enabling posts immediately rather than at the end of the interval,
         // so the row's "On" is confirmed by a log line within a second or two.
@@ -749,30 +736,114 @@ static void menu_activate(void)
     }
 }
 
-/*
- * How long the panel acknowledges a slider gesture before going back to
- * whatever the footer normally says. Three dashboard frames: long enough to
- * read after the hand has moved away, short enough that it is gone by the time
- * anyone looks again.
- */
-#define SLIDER_SNACKBAR_MS  15000
+/* -------------------------------------------------------------------- clock */
 
-static char    s_slider_snackbar[32];
-static int64_t s_slider_snackbar_since_us;
+/*
+ * Wall time comes from SNTP once the station is online; there is no RTC
+ * battery, so until the first sync the clock reads as dashes rather than as
+ * 1 JAN 1970. Anything before 2024 is taken to mean "never synced".
+ */
+#define CLOCK_VALID_AFTER   1704067200      // 2024-01-01T00:00:00Z
+
+static void clock_start(void)
+{
+    setenv("TZ", CONFIG_CLOCK_TZ, 1);
+    tzset();
+
+    // Needs the netif layer up, so only after wifi_sta_init(). lwIP keeps
+    // retrying on its own until the link is there, then resyncs periodically.
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_CLOCK_NTP_SERVER);
+    const esp_err_t err = esp_netif_sntp_init(&config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "sntp start failed: %s", esp_err_to_name(err));
+    }
+}
+
+/* "02 NOV 18:00". Only ui_task calls this, so one static buffer will do. */
+static const char *clock_text(void)
+{
+    static char text[16];
+
+    const time_t now = time(NULL);
+    if (now < CLOCK_VALID_AFTER) {
+        return "-- --- --:--";
+    }
+
+    struct tm local;
+    localtime_r(&now, &local);
+    strftime(text, sizeof(text), "%d %b %H:%M", &local);
+
+    for (char *c = text; *c != '\0'; c++) {
+        *c = (char)toupper((unsigned char)*c);
+    }
+    return text;
+}
+
+
+/* ------------------------------------------------------------ notifications */
+
+/*
+ * How long a notification covers the readings grid. Three dashboard frames:
+ * long enough to read after the hand has moved away, short enough that it is
+ * gone by the time anyone looks again.
+ */
+#define NOTIFY_MS  15000
+
+/*
+ * One slot, newest wins: a second notification arriving inside the first's
+ * window replaces it and restarts the clock. Only ui_task touches these.
+ */
+static char    s_notify_text[32];
+static int64_t s_notify_since_us;
+
+static void notify(const char *text)
+{
+    snprintf(s_notify_text, sizeof(s_notify_text), "%s", text);
+    s_notify_since_us = esp_timer_get_time();
+}
+
+static const char *notify_current(void)
+{
+    if (s_notify_since_us == 0 ||
+        esp_timer_get_time() - s_notify_since_us >= (int64_t)NOTIFY_MS * 1000) {
+        return NULL;
+    }
+    return s_notify_text;
+}
+
+/*
+ * The link going down is announced once, as it happens, rather than held on
+ * screen for as long as it lasts -- a notification covers the readings, and an
+ * AP that stays away for an hour must not hide them for an hour. The lasting
+ * state is the "NO WIFI" marker on the top line, and the purple ring.
+ *
+ * Starts "down", so a board that boots with no AP in range says nothing here.
+ */
+static bool s_link_was_up;
+
+static void update_link_notice(void)
+{
+    const bool up = wifi_sta_is_online();
+
+    if (s_link_was_up && !up) {
+        notify(cloud_is_enabled() ? "Wi-Fi offline - retrying" : "Wi-Fi offline");
+    }
+    s_link_was_up = up;
+}
 
 static void handle_event(touch_event_t event)
 {
+
     if (event == TOUCH_EVENT_SLIDER) {
         /*
-         * A finished slider gesture, not a key. It must not walk the highlight,
-         * open the menu or answer the Wi-Fi offer -- someone reaching for the
+         * A finished slider gesture, not a key. It must not open the menu or answer the Wi-Fi offer -- someone reaching for the
          * brightness has not agreed to anything. The strip already followed the
          * finger from the touch task; all that is left is to say so on the
          * panel, once.
          */
-        snprintf(s_slider_snackbar, sizeof(s_slider_snackbar),
-                 "LED bar %u%%", touch_slider_percent_last());
-        s_slider_snackbar_since_us = esp_timer_get_time();
+        char text[24];
+        snprintf(text, sizeof(text), "LED bar %u%%", touch_slider_percent_last());
+        notify(text);
         return;
     }
 
@@ -783,11 +854,8 @@ static void handle_event(touch_event_t event)
 
     switch (s_ui.screen) {
     case DISPLAY_SCREEN_HOME:
-        if (event == TOUCH_EVENT_LEFT) {
-            s_ui.metric = display_metric_next(s_ui.metric, -1);
-        } else if (event == TOUCH_EVENT_RIGHT) {
-            s_ui.metric = display_metric_next(s_ui.metric, +1);
-        } else {
+        // Left and right have nothing to move between here, so they are ignored.
+        if (event != TOUCH_EVENT_LEFT && event != TOUCH_EVENT_RIGHT) {
             s_ui.screen = DISPLAY_SCREEN_MENU;
             s_ui.menu_row = 0;
         }
@@ -828,26 +896,9 @@ static void apply_ui(display_values_t *v)
 
     switch (s_ui.screen) {
     case DISPLAY_SCREEN_HOME:
-        v->highlight = s_ui.metric;
-        if (s_slider_snackbar_since_us != 0 &&
-            esp_timer_get_time() - s_slider_snackbar_since_us <
-                (int64_t)SLIDER_SNACKBAR_MS * 1000) {
-            /*
-             * Outranks the offline notice for its window. Someone just moved
-             * the slider and is looking at the panel for confirmation; the dead
-             * link was there before the gesture and will still be there after.
-             */
-            v->snackbar_text = s_slider_snackbar;
-        } else if (!wifi_sta_is_online()) {
-            /*
-             * The footer otherwise names the sensors that are not reporting;
-             * the snackbar takes it over while offline, which is the right
-             * trade because a dead link explains missing cloud data in a way
-             * no per-sensor status can. Matches the purple ring.
-             */
-            v->snackbar_text = cloud_is_enabled() ? "Wi-Fi offline - retrying"
-                                                  : "Wi-Fi offline";
-        }
+        v->clock_text    = clock_text();
+        v->status_text   = wifi_sta_is_online() ? NULL : "NO WIFI";
+        v->snackbar_text = notify_current();
         break;
     case DISPLAY_SCREEN_MENU:
         fill_menu(v);
@@ -878,6 +929,7 @@ static void ui_task(void *arg)
         // Runs on every pass, press or tick, so the offer can appear, time out
         // and clear itself without anybody touching the panel.
         update_wifi_prompt();
+        update_link_notice();
 
         air_monitor_device dev;
         air_monitor_get(&dev);
@@ -977,11 +1029,11 @@ void app_main(void)
         touch_has_slider()
             ? "Starting up\n\n"
               "Waiting for the first sensor readings.\n\n"
-              "Left / right pads move the highlight, the middle pad opens the menu.\n"
+              "The middle pad opens the menu.\n"
               "The slider sets the LED bar brightness."
             : "Starting up\n\n"
               "Waiting for the first sensor readings.\n\n"
-              "Left / right pads move the highlight, the middle pad opens the menu.";
+              "The middle pad opens the menu.";
 
     if (display_init(NULL, &splash, true) != ESP_OK) {
         ESP_LOGE(TAG, "display init failed");
@@ -1003,6 +1055,8 @@ void app_main(void)
         // when there is a station to reconfigure.
         s_wifi_ready = true;
         s_boot_deadline_us = esp_timer_get_time() + (int64_t)WIFI_BOOT_GRACE_MS * 1000;
+
+        clock_start();
 
         if ((err = cloud_start()) != ESP_OK) {
             ESP_LOGE(TAG, "cloud start failed: %s", esp_err_to_name(err));

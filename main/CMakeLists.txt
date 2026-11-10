@@ -18,4 +18,5 @@ idf_component_register(
                 cloud
                 esp_app_format   # esp_app_desc.h, for the About page
                 esp_timer        # prompt timeouts and the boot grace period
+                esp_netif        # SNTP, for the dashboard clock
 )

@@ -13,3 +13,20 @@ menu "Display panel"
             menu, and GPIO 3 (the frontlight PWM) is held low at 0% duty.
 
 endmenu
+
+menu "Clock"
+
+    config CLOCK_TZ
+        string "Time zone (POSIX TZ string)"
+        default "<+07>-7"
+        help
+            Local time zone for the dashboard clock, in POSIX TZ form. The
+            sign is inverted relative to UTC offsets: "<+07>-7" is UTC+7
+            (Bangkok), "CET-1CEST,M3.5.0,M10.5.0/3" is Central Europe with
+            daylight saving.
+
+    config CLOCK_NTP_SERVER
+        string "NTP server"
+        default "pool.ntp.org"
+
+endmenu
