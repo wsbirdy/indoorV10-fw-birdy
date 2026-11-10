@@ -43,7 +43,6 @@ extern "C" {
 #define DISPLAY_INVALID_TVOC        (-1)
 #define DISPLAY_INVALID_NOX         (-1)
 #define DISPLAY_INVALID_PRESSURE    (-1.0f)
-#define DISPLAY_INVALID_ALTITUDE    (-10000.0f)
 
 /**
  * @brief Which page the panel is showing.
@@ -52,42 +51,10 @@ extern "C" {
  * and a factory fuel-gauge path. This board has three.
  */
 typedef enum {
-    DISPLAY_SCREEN_HOME,    ///< Sensor dashboard: headline PM2.5 + AQI + rows
+    DISPLAY_SCREEN_HOME,    ///< Sensor dashboard: PM2.5 and CO2 large, the rest below
     DISPLAY_SCREEN_MENU,    ///< Full-canvas list. Owns the whole canvas.
     DISPLAY_SCREEN_INFO,    ///< Single wrapped-text page. Owns the whole canvas.
 } display_screen_t;
-
-/**
- * @brief A reading the dashboard can single out.
- *
- * Declaration order is the cycle order the left and right pads walk, which is
- * also reading order on the panel: down the left column, then down the right.
- * Mirrors Metric in the reference, widened to this board's sensor set.
- */
-typedef enum {
-    DISPLAY_METRIC_NONE = 0,    ///< Nothing highlighted (menu and info pages)
-    DISPLAY_METRIC_PM25,
-    DISPLAY_METRIC_PM1,
-    DISPLAY_METRIC_PM10,
-    DISPLAY_METRIC_CO2,
-    DISPLAY_METRIC_TEMP,
-    DISPLAY_METRIC_HUMIDITY,
-    DISPLAY_METRIC_TVOC,
-    DISPLAY_METRIC_NOX,
-    DISPLAY_METRIC_PRESSURE,
-    DISPLAY_METRIC_ALTITUDE,
-    DISPLAY_METRIC_COUNT,
-} display_metric_t;
-
-/**
- * @brief Step the highlight, wrapping at both ends.
- *
- * DISPLAY_METRIC_NONE is not part of the cycle -- stepping from it lands on
- * the first real metric in whichever direction was asked for.
- *
- * @param delta  +1 for the right pad, -1 for the left.
- */
-display_metric_t display_metric_next(display_metric_t from, int delta);
 
 /**
  * @brief Longest menu the renderer will draw.
@@ -120,16 +87,13 @@ typedef struct {
  */
 typedef struct {
     /* --- Sensor readings --- */
-    float pm1_ugm3;
     float pm25_ugm3;
-    float pm10_ugm3;
     int   co2_ppm;
     float temperature_c;
     float humidity_pct;
     int   tvoc_raw;         ///< SGP41 raw ticks, not the 0..500 gas index
     int   nox_raw;
     float pressure_hpa;
-    float altitude_m;
 
     /** SGP41 is in its warm-up window: shown as "warmup", not as "--". */
     bool tvoc_conditioning;
@@ -145,9 +109,6 @@ typedef struct {
     /* --- Screen selection --- */
     display_screen_t screen;
 
-    /** Reading drawn inverted on the dashboard. NONE highlights nothing. */
-    display_metric_t highlight;
-
     /* --- DISPLAY_SCREEN_MENU --- */
     display_row_t rows[DISPLAY_MAX_ROWS];
     uint8_t       row_count;
@@ -159,25 +120,31 @@ typedef struct {
     /** Body text for DISPLAY_SCREEN_INFO. Wraps on spaces; '\n' breaks hard. */
     const char *info_text;
 
-    /** One line pinned to the bottom of the dashboard. NULL for none. */
+    /** Dashboard top line, centred, e.g. "02 NOV 18:00". NULL for none. */
+    const char *clock_text;
+
+    /** Dashboard top line, flushed right, e.g. "NO WIFI". NULL for none. */
+    const char *status_text;
+
+    /**
+     * Notification on the dashboard. While set, it is drawn over the readings
+     * grid and hides it; the caller decides how long it stays by how long it
+     * keeps sending it. NULL for none.
+     */
     const char *snackbar_text;
 } display_values_t;
 
 /** @brief Initializer that marks every reading absent. */
 #define DISPLAY_VALUES_DEFAULT                      \
     (display_values_t) {                            \
-        .pm1_ugm3       = DISPLAY_INVALID_PM,       \
         .pm25_ugm3      = DISPLAY_INVALID_PM,       \
-        .pm10_ugm3      = DISPLAY_INVALID_PM,       \
         .co2_ppm        = DISPLAY_INVALID_CO2,      \
         .temperature_c  = DISPLAY_INVALID_TEMPERATURE, \
         .humidity_pct   = DISPLAY_INVALID_HUMIDITY, \
         .tvoc_raw       = DISPLAY_INVALID_TVOC,     \
         .nox_raw        = DISPLAY_INVALID_NOX,      \
         .pressure_hpa   = DISPLAY_INVALID_PRESSURE, \
-        .altitude_m     = DISPLAY_INVALID_ALTITUDE, \
         .screen         = DISPLAY_SCREEN_HOME,      \
-        .highlight      = DISPLAY_METRIC_NONE,      \
     }
 
 /** @brief Same, for assigning into an existing struct. */
