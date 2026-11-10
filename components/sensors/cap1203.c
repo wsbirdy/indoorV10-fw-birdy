@@ -299,7 +299,14 @@ esp_err_t cap1203_init(void)
                         "manufacturer id read failed");
 
     if (product_id != PRODUCT_ID_CAP1203 || manufacturer_id != MANUFACTURER_ID_MCHP) {
-        ESP_LOGE(TAG, "unexpected ids 0x%02X/0x%02X", product_id, manufacturer_id);
+        // 54h is a CAP1133, which shares this fixed address: a wrong-board
+        // build, not a broken panel. See TOUCH_IC in touch.h.
+        if (product_id == 0x54) {
+            ESP_LOGE(TAG, "found a CAP1133, not a CAP1203 -- "
+                          "set TOUCH_IC to TOUCH_IC_CAP1133 in touch.h");
+        } else {
+            ESP_LOGE(TAG, "unexpected ids 0x%02X/0x%02X", product_id, manufacturer_id);
+        }
         return detach_on_error(ESP_ERR_NOT_FOUND);
     }
 

@@ -11,7 +11,7 @@ extern "C" {
 /*
  * The board's touch panel, whichever part is fitted.
  *
- * Two generations of this board exist and they carry different Microchip
+ * Several fits of this board exist and they carry different Microchip
  * capacitive controllers. One part is fitted, not both, and which one is a
  * property of the board rather than something worth probing for at runtime.
  *
@@ -24,6 +24,10 @@ extern "C" {
  *             CS4/CS5/CS6 -> one vertical slider, CS6 top and CS4 bottom,
  *             each with its own LED. Drives the WS2812 bar's brightness.
  *
+ *   CAP1133   three pads, three LED drivers. Address fixed at 0x28.
+ *             CS1/CS2/CS3 -> left, enter, right, each with its own LED.
+ *             No slider. See cap1133.h for the assumed wiring.
+ *
  * Everything above the driver talks to this header instead of to a part, so
  * changing the fit is the one line below and nothing else. Callers that use
  * the slider still compile against a CAP1203: touch_has_slider() is a compile
@@ -33,23 +37,26 @@ extern "C" {
 
 #define TOUCH_IC_CAP1203    1203
 #define TOUCH_IC_CAP1166    1166
+#define TOUCH_IC_CAP1133    1133
 
 /* ---------------------------------------------------------------------
  * BOARD FIT -- set this to the part this board carries.
  * --------------------------------------------------------------------- */
 #ifndef TOUCH_IC
-#define TOUCH_IC            TOUCH_IC_CAP1166
+#define TOUCH_IC            TOUCH_IC_CAP1203
 #endif
 
 #if TOUCH_IC == TOUCH_IC_CAP1166
 #include "cap1166.h"
+#elif TOUCH_IC == TOUCH_IC_CAP1133
+#include "cap1133.h"
 #elif TOUCH_IC == TOUCH_IC_CAP1203
 #include "cap1203.h"
 #else
-#error "TOUCH_IC must be TOUCH_IC_CAP1203 or TOUCH_IC_CAP1166"
+#error "TOUCH_IC must be TOUCH_IC_CAP1203, TOUCH_IC_CAP1166 or TOUCH_IC_CAP1133"
 #endif
 
-/** Button pads, in the bit positions both parts use for CS1..CS3. */
+/** Button pads, in the bit positions every part uses for CS1..CS3. */
 #define TOUCH_PAD_LEFT      0x01
 #define TOUCH_PAD_ENTER     0x02
 #define TOUCH_PAD_RIGHT     0x04
@@ -131,6 +138,47 @@ static inline bool touch_has_leds(void)     { return true; }
 static inline void touch_led_idle_timeout(uint32_t timeout_ms)
 {
     cap1166_led_idle_timeout(timeout_ms);
+}
+
+#elif TOUCH_IC == TOUCH_IC_CAP1133
+
+#define TOUCH_IC_NAME       "CAP1133"
+
+/** No slider pads on this part, so nothing in touch_pads() belongs to one. */
+#define TOUCH_PADS_SLIDER   0x00
+
+static inline bool touch_has_slider(void)   { return false; }
+
+static inline esp_err_t touch_start(void)   { return cap1133_start(); }
+static inline uint8_t  touch_pads(void)     { return cap1133_pads(); }
+static inline bool     touch_pads_valid(void)      { return cap1133_pads_valid(); }
+static inline uint32_t touch_pads_updated_ms(void) { return cap1133_pads_updated_ms(); }
+
+static inline bool touch_event_wait(touch_event_t *out, uint32_t timeout_ms)
+{
+    cap1133_event_t event = CAP1133_EVENT_NONE;
+    if (!cap1133_event_wait(&event, timeout_ms)) {
+        return false;
+    }
+
+    switch (event) {
+    case CAP1133_EVENT_LEFT:   *out = TOUCH_EVENT_LEFT;   return true;
+    case CAP1133_EVENT_ENTER:  *out = TOUCH_EVENT_ENTER;  return true;
+    case CAP1133_EVENT_RIGHT:  *out = TOUCH_EVENT_RIGHT;  return true;
+    case CAP1133_EVENT_NONE:
+    default:                   return false;
+    }
+}
+
+static inline uint8_t touch_slider_percent(void)      { return TOUCH_SLIDER_RELEASED; }
+static inline uint8_t touch_slider_percent_last(void) { return 0; }
+static inline void touch_slider_on_change(touch_slider_cb_t callback) { (void)callback; }
+
+static inline bool touch_has_leds(void)     { return true; }
+
+static inline void touch_led_idle_timeout(uint32_t timeout_ms)
+{
+    cap1133_led_idle_timeout(timeout_ms);
 }
 
 #else   /* TOUCH_IC_CAP1203 */
