@@ -44,10 +44,10 @@ extern "C" {
 
 /*
  * ALERT# -- pin 1 on the DFN. Assumed to be routed to the same Touch_INT net
- * (GPIO 25, pulled up) as the CAP1166 fit. Set -1 to poll instead, which still
+ * (GPIO 6, pulled up) as the CAP1166 fit. Set -1 to poll instead, which still
  * works at the cost of up to 50 ms of latency and steady bus traffic.
  */
-#define CAP1133_ALERT_GPIO  25
+#define CAP1133_ALERT_GPIO  6
 
 #define CAP1133_PAD1        0x01
 #define CAP1133_PAD2        0x02

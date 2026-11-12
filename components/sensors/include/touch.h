@@ -43,7 +43,7 @@ extern "C" {
  * BOARD FIT -- set this to the part this board carries.
  * --------------------------------------------------------------------- */
 #ifndef TOUCH_IC
-#define TOUCH_IC            TOUCH_IC_CAP1203
+#define TOUCH_IC            TOUCH_IC_CAP1166
 #endif
 
 #if TOUCH_IC == TOUCH_IC_CAP1166
