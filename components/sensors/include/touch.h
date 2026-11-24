@@ -56,6 +56,32 @@ extern "C" {
 #error "TOUCH_IC must be TOUCH_IC_CAP1203, TOUCH_IC_CAP1166 or TOUCH_IC_CAP1133"
 #endif
 
+/* ---------------------------------------------------------------------
+ * ANALOG GAIN -- 1, 2, 4 or 8. GAIN[1:0] in the part's Main Control.
+ *
+ * The front-end gain, ahead of DELTA_SENSE (fixed at 128x in each driver).
+ * Raise it when pads are small or the overlay thick and touches read weak
+ * in the menu's touch test. Watch two things at each step:
+ *   - a firm press reading 127 is clipped; the combination is too hot,
+ *   - the untouched signal grows with the gain too; keep the weakest real
+ *     touch at least ~5x above it.
+ * Written at init, followed by a recalibration of every pad (up to 600 ms
+ * at boot during which a finger on a pad spoils that pad's baseline).
+ *
+ * CAP1133 and CAP1166 only: the CAP1203 has no GAIN bits, so anything but 1
+ * is a build error on that fit.
+ * --------------------------------------------------------------------- */
+#ifndef TOUCH_GAIN
+#define TOUCH_GAIN          1
+#endif
+
+#if TOUCH_GAIN != 1 && TOUCH_GAIN != 2 && TOUCH_GAIN != 4 && TOUCH_GAIN != 8
+#error "TOUCH_GAIN must be 1, 2, 4 or 8"
+#endif
+#if TOUCH_IC == TOUCH_IC_CAP1203 && TOUCH_GAIN != 1
+#error "TOUCH_GAIN: the CAP1203 has no analog gain setting, leave it at 1"
+#endif
+
 /** Button pads, in the bit positions every part uses for CS1..CS3. */
 #define TOUCH_PAD_LEFT      0x01
 #define TOUCH_PAD_ENTER     0x02
@@ -120,7 +146,11 @@ static inline esp_err_t touch_dump_registers(void);
 
 static inline bool touch_has_slider(void)   { return true; }
 
-static inline esp_err_t touch_start(void)   { return cap1166_start(); }
+static inline esp_err_t touch_start(void)
+{
+    const esp_err_t err = cap1166_set_gain(TOUCH_GAIN);
+    return err != ESP_OK ? err : cap1166_start();
+}
 static inline uint8_t  touch_pads(void)     { return cap1166_pads(); }
 static inline bool     touch_pads_valid(void)      { return cap1166_pads_valid(); }
 static inline uint32_t touch_pads_updated_ms(void) { return cap1166_pads_updated_ms(); }
@@ -192,7 +222,11 @@ static inline esp_err_t touch_dump_registers(void) { return cap1166_dump_registe
 
 static inline bool touch_has_slider(void)   { return false; }
 
-static inline esp_err_t touch_start(void)   { return cap1133_start(); }
+static inline esp_err_t touch_start(void)
+{
+    const esp_err_t err = cap1133_set_gain(TOUCH_GAIN);
+    return err != ESP_OK ? err : cap1133_start();
+}
 static inline uint8_t  touch_pads(void)     { return cap1133_pads(); }
 static inline bool     touch_pads_valid(void)      { return cap1133_pads_valid(); }
 static inline uint32_t touch_pads_updated_ms(void) { return cap1133_pads_updated_ms(); }

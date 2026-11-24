@@ -95,6 +95,22 @@ esp_err_t cap1133_read_thresholds(uint8_t threshold[3]);
 esp_err_t cap1133_set_sensitivity(uint8_t delta_sense);
 
 /**
+ * @brief Choose the analog gain, GAIN[1:0] in Main Control: 1, 2, 4 or 8.
+ *
+ * Separate from DELTA_SENSE, which scales the delta count after the
+ * measurement. Higher gain lets a smaller capacitance change reach the same
+ * delta; with DELTA_SENSE at 128x that can clip deltas at +127, in which case
+ * lower DELTA_SENSE rather than the gain. Power-on default is 1x.
+ *
+ * Only recorded here: cap1133_init() writes it and recalibrates every pad.
+ * Call it before init -- touch_start() does, from TOUCH_GAIN in touch.h.
+ *
+ * @return ESP_ERR_INVALID_ARG for any other value, ESP_ERR_INVALID_STATE
+ *         once the part has been initialised.
+ */
+esp_err_t cap1133_set_gain(uint8_t gain);
+
+/**
  * @brief Choose which LEDs the part drives from their own sensor input.
  *
  * A linked LED goes out while its pad is touched, entirely inside the chip.

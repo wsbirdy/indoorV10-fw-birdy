@@ -24,6 +24,7 @@ static const char *TAG = "cap1133";
 #define REG_SENSITIVITY         0x1F
 #define REG_SENSOR_ENABLE       0x21
 #define REG_AVG_AND_SAMPLING    0x24
+#define REG_CALIBRATION_ACTIVATE 0x26
 #define REG_INTERRUPT_ENABLE    0x27
 #define REG_REPEAT_RATE_ENABLE  0x28
 #define REG_MULTIPLE_TOUCH_CFG  0x2A
@@ -41,6 +42,9 @@ static const char *TAG = "cap1133";
 #define MANUFACTURER_ID_MCHP    0x5D
 
 #define MAIN_CONTROL_INT        0x01
+/* GAIN[1:0], Main Control bits 7:6 (datasheet table 5.3): 00b 1x .. 11b 8x. */
+#define MAIN_CONTROL_GAIN_MASK  0xC0
+#define MAIN_CONTROL_GAIN_SHIFT 6
 
 #define I2C_TIMEOUT_MS          100
 
@@ -73,6 +77,9 @@ static const char *TAG = "cap1133";
 #define AVG_AND_SAMPLING_FAST       0x38
 
 static i2c_master_dev_handle_t s_dev;
+
+/* GAIN[1:0] that init writes. 0 is 1x, the reset value; see cap1133_set_gain(). */
+static uint8_t s_gain_code;
 
 static esp_err_t reg_write(uint8_t reg, uint8_t value)
 {
@@ -195,6 +202,57 @@ static esp_err_t detach_on_error(esp_err_t err)
     return err;
 }
 
+/* 1/2/4/8 -> GAIN[1:0], or -1 for anything else. */
+static int gain_code(uint8_t gain)
+{
+    switch (gain) {
+    case 1:  return 0;
+    case 2:  return 1;
+    case 4:  return 2;
+    case 8:  return 3;
+    default: return -1;
+    }
+}
+
+esp_err_t cap1133_set_gain(uint8_t gain)
+{
+    const int code = gain_code(gain);
+    ESP_RETURN_ON_FALSE(code >= 0, ESP_ERR_INVALID_ARG, TAG, "gain must be 1, 2, 4 or 8");
+
+    // Asking again for the gain already in force is not a change.
+    if (s_dev != NULL && code == s_gain_code) {
+        return ESP_OK;
+    }
+
+    // Main Control also carries INT, which the touch task clears with a
+    // read-modify-write of its own; a GAIN write racing that could be undone.
+    // Init is the one point nothing else is talking to the part.
+    ESP_RETURN_ON_FALSE(s_dev == NULL, ESP_ERR_INVALID_STATE, TAG, "set the gain before init");
+
+    s_gain_code = (uint8_t)code;
+    return ESP_OK;
+}
+
+/*
+ * Write GAIN and recalibrate. The base counts the part holds were taken at
+ * whatever gain was set before -- 1x from power-on, or the previous build's
+ * after a soft reboot -- and against a different gain every pad would read as
+ * a large touch or a large negative delta until the part recalibrated on its
+ * own. Calibration Activate does it now: up to 600 ms with no presses
+ * detected, and a finger on a pad meanwhile spoils that pad's calibration.
+ */
+static esp_err_t apply_gain(void)
+{
+    uint8_t main_control = 0;
+    ESP_RETURN_ON_ERROR(reg_read(REG_MAIN_CONTROL, &main_control), TAG, "control read failed");
+
+    main_control = (uint8_t)((main_control & ~MAIN_CONTROL_GAIN_MASK) |
+                             (s_gain_code << MAIN_CONTROL_GAIN_SHIFT));
+    ESP_RETURN_ON_ERROR(reg_write(REG_MAIN_CONTROL, main_control), TAG, "gain write failed");
+
+    return reg_write(REG_CALIBRATION_ACTIVATE, CAP1133_PADS_ALL);
+}
+
 esp_err_t cap1133_init(void)
 {
     if (s_dev) {
@@ -262,9 +320,11 @@ esp_err_t cap1133_init(void)
     ESP_RETURN_ON_ERROR(detach_on_error(cap1133_set_sensitivity(SENSITIVITY_HIGHEST)), TAG,
                         "sensitivity failed");
 
+    ESP_RETURN_ON_ERROR(detach_on_error(apply_gain()), TAG, "gain failed");
+
     ESP_LOGI(TAG, "ready at 0x%02X (rev 0x%02X), CS1-3 buttons, "
-                  "3 LEDs linked and lit until touched, DELTA_SENSE %d (128x)",
-             CAP1133_I2C_ADDR, revision, SENSITIVITY_HIGHEST);
+                  "3 LEDs linked and lit until touched, GAIN %ux, DELTA_SENSE %d (128x)",
+             CAP1133_I2C_ADDR, revision, 1u << s_gain_code, SENSITIVITY_HIGHEST);
 
     return ESP_OK;
 }
