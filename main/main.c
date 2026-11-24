@@ -50,6 +50,14 @@ static const char *TAG = "main";
  */
 #define DISPLAY_TICK_MS     5000
 
+/*
+ * While the panel is still painting, how often ui_task looks again. It is
+ * woken at once by a press anyway, so this only bounds how late the next frame
+ * goes out after the paint finishes with nobody touching.
+ */
+#define PRESS_FOLD_POLL_MS  20
+
+
 
 /* ----------------------------------------------------------------- UI state */
 
@@ -1548,6 +1556,27 @@ static void ui_task(void *arg)
 
         if (pressed) {
             handle_event(event);
+
+            /*
+             * Fold in every press that lands before the panel can take another
+             * frame. A partial refresh takes a large fraction of a second, so
+             * painting each tap of a quick scroll in turn leaves the screen
+             * several frames behind the finger and spends the partial budget
+             * on rows nobody stopped at. The state moves with every press;
+             * only the row the finger stopped on gets painted. A lone tap
+             * finds the worker idle and paints at once, as before.
+             */
+            for (;;) {
+                while (touch_event_wait(&event, 0)) {
+                    handle_event(event);
+                }
+                if (!display_is_busy()) {
+                    break;
+                }
+                if (touch_event_wait(&event, PRESS_FOLD_POLL_MS)) {
+                    handle_event(event);
+                }
+            }
         }
 
         // Runs on every pass, press or tick, so the offer can appear, time out

@@ -706,6 +706,11 @@ void display_flush(void)
     }
 }
 
+bool display_is_busy(void)
+{
+    return s_worker_busy;
+}
+
 void display_request_full_refresh(void)
 {
     /* Reuses the no-basemap arm of the tier policy rather than adding a

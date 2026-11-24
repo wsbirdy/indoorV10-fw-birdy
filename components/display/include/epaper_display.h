@@ -209,6 +209,14 @@ void display_update_sync(const display_values_t *values);
 void display_flush(void);
 
 /**
+ * @brief True while the worker is still painting the last frame.
+ *
+ * A frame handed over now would only wait behind it, so a caller with input
+ * arriving can keep folding that input in until this goes false.
+ */
+bool display_is_busy(void);
+
+/**
  * @brief Make the next submission a full refresh.
  *
  * The tier policy already promotes one every few frames to keep afterimages
