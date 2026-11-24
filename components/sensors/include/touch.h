@@ -43,7 +43,7 @@ extern "C" {
  * BOARD FIT -- set this to the part this board carries.
  * --------------------------------------------------------------------- */
 #ifndef TOUCH_IC
-#define TOUCH_IC            TOUCH_IC_CAP1203
+#define TOUCH_IC            TOUCH_IC_CAP1133
 #endif
 
 #if TOUCH_IC == TOUCH_IC_CAP1166
@@ -72,7 +72,7 @@ extern "C" {
  * is a build error on that fit.
  * --------------------------------------------------------------------- */
 #ifndef TOUCH_GAIN
-#define TOUCH_GAIN          1
+#define TOUCH_GAIN          2
 #endif
 
 #if TOUCH_GAIN != 1 && TOUCH_GAIN != 2 && TOUCH_GAIN != 4 && TOUCH_GAIN != 8
