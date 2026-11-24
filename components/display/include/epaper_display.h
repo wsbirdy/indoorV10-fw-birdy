@@ -62,7 +62,7 @@ typedef enum {
  * More than fit on the panel at once: the list scrolls to keep the selected
  * row in view.
  */
-#define DISPLAY_MAX_ROWS 12
+#define DISPLAY_MAX_ROWS 16
 
 /**
  * @brief One menu line: a name on the left, its current setting on the right.

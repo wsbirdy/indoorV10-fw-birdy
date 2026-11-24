@@ -1,4 +1,6 @@
 #include <ctype.h>
+#include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +10,7 @@
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -58,7 +61,6 @@ static const char *TAG = "main";
 #define PRESS_FOLD_POLL_MS  20
 
 
-
 /* ----------------------------------------------------------------- UI state */
 
 /*
@@ -85,6 +87,7 @@ static struct {
     display_screen_t screen;
     uint8_t          menu_row;
     bool             led_on;
+    uint8_t          led_metric;    ///< led_metric_t: what the ring shows
     bool             use_fahrenheit;
     bool             dark_theme;
 #if CONFIG_DISPLAY_FRONTLIGHT
@@ -97,6 +100,7 @@ static struct {
 } s_ui = {
     .screen = DISPLAY_SCREEN_HOME,
     .led_on = true,
+    .led_metric = 0,                // PM2.5, what the ring always showed
 #if CONFIG_DISPLAY_FRONTLIGHT
     .frontlight = 0,                // off until asked for; see apply_frontlight()
 #endif
@@ -283,21 +287,116 @@ static void on_slider_moved(uint8_t percent)
 /* ------------------------------------------------------------- AQI -> LEDs */
 
 /*
- * The strip is a bar graph: two LEDs per AQI band, all lit in that band's EPA
- * colour, so the height reads as "how bad" and the colour names the category.
- * Hazardous is the whole strip.
+ * LED_BAR_STYLE -- hardcoded; pick one and rebuild.
+ *
+ *   LED_BAR_STYLE_LEVEL  a bar graph: how many LEDs are lit follows the reading,
+ *                        one at the cleanest band up to nine at the worst, all
+ *                        in that band's colour. The AirGradient ONE's scheme.
+ *   LED_BAR_STYLE_FULL   every LED lit in the band's colour; only the colour
+ *                        says how bad.
+ *
+ * Which reading drives it, PM2.5 or CO2, is the user's choice from the menu
+ * ("LED shows"). Bands and colours are the same in both styles.
  */
-static int leds_for_aqi(int aqi, aqi_category_t category)
+#define LED_BAR_STYLE_FULL      0
+#define LED_BAR_STYLE_LEVEL     1
+
+#define LED_BAR_STYLE           LED_BAR_STYLE_LEVEL
+
+/*
+ * Which end the bar grows from. 0: from index 0, the LED nearest the MCU.
+ * 1: from the far end, for a strip mounted the other way round.
+ */
+#define LED_BAR_FROM_FAR_END    1
+
+#if LED_BAR_STYLE != LED_BAR_STYLE_FULL && LED_BAR_STYLE != LED_BAR_STYLE_LEVEL
+#error "LED_BAR_STYLE must be LED_BAR_STYLE_FULL or LED_BAR_STYLE_LEVEL"
+#endif
+
+typedef struct {
+    uint8_t r, g, b;
+} led_rgb_t;
+
+/* The ONE's palette, at full scale; the slider's brightness scales it on the way out. */
+#define LED_GREEN   { 0,   255, 0   }
+#define LED_YELLOW  { 255, 255, 0   }
+#define LED_ORANGE  { 255, 128, 0   }
+#define LED_RED     { 255, 0,   0   }
+#define LED_PURPLE  { 180, 0,   255 }
+
+static const led_rgb_t LED_ALTERNATE_RGB = LED_RED;
+
+typedef struct {
+    int       upto;         ///< inclusive upper edge of the band, in the reading's units
+    uint8_t   count;        ///< LEDs lit in LED_BAR_STYLE_LEVEL
+    led_rgb_t colour;
+    bool      alternate;    ///< off-scale: colour and LED_ALTERNATE_RGB in turn
+} led_band_t;
+
+/*
+ * Band edges as the AirGradient ONE draws them (AgStateMachine.cpp), the
+ * reading rounded to a whole number first. Last entry catches everything above.
+ */
+static const led_band_t PM25_BANDS[] = {        // ug/m3
+    { 5,       1, LED_GREEN,  false },
+    { 9,       2, LED_GREEN,  false },
+    { 20,      3, LED_YELLOW, false },
+    { 35,      4, LED_YELLOW, false },
+    { 45,      5, LED_ORANGE, false },
+    { 55,      6, LED_ORANGE, false },
+    { 100,     7, LED_RED,    false },
+    { 125,     8, LED_RED,    false },
+    { 225,     9, LED_PURPLE, false },
+    { INT_MAX, 9, LED_PURPLE, true  },
+};
+
+static const led_band_t CO2_BANDS[] = {         // ppm
+    { 600,     1, LED_GREEN,  false },
+    { 800,     2, LED_GREEN,  false },
+    { 1000,    3, LED_YELLOW, false },
+    { 1250,    4, LED_ORANGE, false },
+    { 1500,    5, LED_ORANGE, false },
+    { 1750,    6, LED_RED,    false },
+    { 2000,    7, LED_RED,    false },
+    { 3000,    8, LED_PURPLE, false },
+    { INT_MAX, 9, LED_PURPLE, true  },
+};
+
+#define BAND_COUNT(bands)   (sizeof(bands) / sizeof((bands)[0]))
+
+/* What the ring shows; chosen from the menu. */
+typedef enum {
+    LED_METRIC_PM25 = 0,
+    LED_METRIC_CO2,
+} led_metric_t;
+
+static uint16_t bar_index(int i)
 {
-    static const int BAND_LO[] = { 0, 51, 101, 151, 201 };
-    static const int BAND_HI[] = { 50, 100, 150, 200, 300 };
+    return LED_BAR_FROM_FAR_END ? (uint16_t)(WS2812_LED_COUNT - 1 - i) : (uint16_t)i;
+}
 
-    if (category >= AQI_HAZARDOUS) {
-        return WS2812_LED_COUNT;
+static const led_band_t *band_for(const led_band_t *bands, size_t count, int value)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (value <= bands[i].upto) {
+            return &bands[i];
+        }
     }
+    return &bands[count - 1];
+}
 
-    const int midpoint = (BAND_LO[category] + BAND_HI[category]) / 2;
-    return (int)category * 2 + ((aqi > midpoint) ? 2 : 1);
+static void paint_band(const led_band_t *band)
+{
+#if LED_BAR_STYLE == LED_BAR_STYLE_FULL
+    const int lit = WS2812_LED_COUNT;
+#else
+    const int lit = (band->count < WS2812_LED_COUNT) ? band->count : WS2812_LED_COUNT;
+#endif
+
+    for (int i = 0; i < lit; i++) {
+        const led_rgb_t *c = (band->alternate && (i & 1)) ? &LED_ALTERNATE_RGB : &band->colour;
+        ws2812_set_pixel(bar_index(i), c->r, c->g, c->b);
+    }
 }
 
 /*
@@ -309,47 +408,70 @@ static int leds_for_aqi(int aqi, aqi_category_t category)
 #define OFFLINE_G   0
 #define OFFLINE_B   160
 
+/*
+ * report_task repaints on its period and ui_task repaints at once when a menu
+ * row changes what the ring shows. Each ws2812 call takes the strip's own
+ * lock, but a frame is several calls, so the whole frame goes under this one.
+ */
+static SemaphoreHandle_t s_leds_lock;
+
 static void update_leds(const air_monitor_device *dev)
 {
+    if (s_leds_lock) {
+        xSemaphoreTake(s_leds_lock, portMAX_DELAY);
+    }
+
     ws2812_set_all(0, 0, 0);
 
     if (!s_ui.led_on) {
         // Switched off from the menu: nothing lit, but still refreshed so the
         // strip actually goes dark rather than holding its last frame.
-        ws2812_refresh();
-        return;
-    }
-
-    if (!wifi_sta_is_online()) {
+    } else if (!wifi_sta_is_online()) {
         /*
-         * Outranks the AQI colour deliberately: the ring is a single-colour
-         * indicator, so it can only say one thing at a time, and a monitor
-         * that has quietly stopped reporting is the more urgent of the two.
-         * The panel keeps showing the readings either way.
+         * Outranks the reading deliberately: a monitor that has quietly
+         * stopped reporting is the more urgent of the two. The panel keeps
+         * showing the readings either way.
          */
         ws2812_set_all(OFFLINE_R, OFFLINE_G, OFFLINE_B);
-        ws2812_refresh();
-        return;
-    }
-
-    if (!dev->pm_valid) {
-        // No particle data: one dim white pixel rather than a misleading colour.
-        ws2812_set_pixel(0, 24, 24, 24);
     } else {
-        const int aqi = aqi_from_pm25(dev->pm.pm2_5_ugm3);
-        const aqi_category_t category = aqi_category(aqi);
+        bool valid;
+        int value;
+        const led_band_t *bands;
+        size_t count;
 
-        uint8_t r, g, b;
-        aqi_category_rgb(category, &r, &g, &b);
+        if (s_ui.led_metric == LED_METRIC_CO2) {
+            valid = dev->co2_valid;
+            value = dev->co2_ppm;
+            bands = CO2_BANDS;
+            count = BAND_COUNT(CO2_BANDS);
+        } else {
+            valid = dev->pm_valid;
+            value = valid ? (int)lroundf(dev->pm.pm2_5_ugm3) : 0;
+            bands = PM25_BANDS;
+            count = BAND_COUNT(PM25_BANDS);
+        }
 
-        ws2812_set_all(r,g,b);
-        // const int lit = leds_for_aqi(aqi, category);
-        // for (int i = 0; i < lit; i++) {
-        //     ws2812_set_pixel((uint16_t)i, r, g, b);
-        // }
+        if (valid) {
+            paint_band(band_for(bands, count, value));
+        } else {
+            // No reading for the chosen metric: one dim white pixel rather than a misleading colour.
+            ws2812_set_pixel(bar_index(0), 24, 24, 24);
+        }
     }
 
     ws2812_refresh();
+
+    if (s_leds_lock) {
+        xSemaphoreGive(s_leds_lock);
+    }
+}
+
+/* For ui_task: show a menu change on the ring now rather than at the next report. */
+static void repaint_leds_now(void)
+{
+    air_monitor_device dev;
+    air_monitor_get(&dev);
+    update_leds(&dev);
 }
 
 /* -------------------------------------------------------------- reporting */
@@ -639,6 +761,7 @@ static bool handle_prompt_button(touch_event_t event)
  */
 enum {
     MENU_LED,
+    MENU_LED_METRIC,
 #if CONFIG_DISPLAY_FRONTLIGHT
     MENU_FRONTLIGHT,
 #endif
@@ -718,6 +841,8 @@ static void fill_menu(display_values_t *v)
     fill_led_row_value();
 
     v->rows[MENU_LED]        = (display_row_t){ "LED ring",     s_led_row_value };
+    v->rows[MENU_LED_METRIC] = (display_row_t){ "LED shows",
+                                                s_ui.led_metric == LED_METRIC_CO2 ? "CO2" : "PM2.5" };
 #if CONFIG_DISPLAY_FRONTLIGHT
     v->rows[MENU_FRONTLIGHT] = (display_row_t){ "Frontlight",
                                                 FRONTLIGHT_LEVELS[s_ui.frontlight].name };
@@ -751,6 +876,12 @@ static void menu_activate(void)
     switch (s_ui.menu_row) {
     case MENU_LED:
         s_ui.led_on = !s_ui.led_on;
+        repaint_leds_now();
+        break;
+
+    case MENU_LED_METRIC:
+        s_ui.led_metric = (s_ui.led_metric == LED_METRIC_CO2) ? LED_METRIC_PM25 : LED_METRIC_CO2;
+        repaint_leds_now();
         break;
 
 #if CONFIG_DISPLAY_FRONTLIGHT
@@ -1649,6 +1780,8 @@ void app_main(void)
     } else {
         apply_pad_led_timeout();
     }
+
+    s_leds_lock = xSemaphoreCreateMutex();
 
     if (ws2812_init() != ESP_OK) {
         ESP_LOGE(TAG, "LED strip init failed");
