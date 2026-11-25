@@ -5,9 +5,8 @@ ESP-IDF firmware for the indoorV10 indoor air monitor (ESP32-C5) with a
 
 ## Features
 
-- **Sensors**: temperature and humidity (SHT40), pressure (SPL07), VOC/NOx (SGP41),
-  particulates (Sensirion SPS30 or Plantower PMS5003, detected at boot) and CO2
-  (Senseair S88 or S12, detected at boot).
+- **Sensors**: temperature, humidity, pressure, VOC/NOx, particulates and CO2.
+  See [Supported sensors](#supported-sensors).
 - **E-paper dashboard**: PM2.5 and CO2 as headline figures, climate, gas and
   pressure groups, a top bar with sensor status, the clock (SNTP), and a
   "NO WIFI" flag. Notifications clear themselves after 15 s. Partial refreshes,
@@ -41,6 +40,35 @@ ESP-IDF firmware for the indoorV10 indoor air monitor (ESP32-C5) with a
   - About
 
   Menu settings are not saved across reboots.
+
+## Supported sensors
+
+| Measures | Part | Bus | Address / port |
+|---|---|---|---|
+| Temperature, humidity | Sensirion SHT40 | I2C | `0x44` (`0x45` for -BD1B parts) |
+| Pressure | Goertek SPL07 | I2C | `0x77` (`0x76` with SDO low) |
+| VOC, NOx (raw signals) | Sensirion SGP41 | I2C | `0x59` |
+| PM1.0 / 2.5 / 4.0 / 10 | Sensirion SPS30 | I2C | `0x69` |
+| PM1.0 / 2.5 / 10 | Plantower PMS5003 | UART0 | 9600 8N1 |
+| CO2 | Senseair S12 | LP UART, Modbus RTU | slave `0x68`, 9600 8N1 |
+| CO2 | Senseair S88 | LP UART, Modbus RTU | slave `0xFE`, 9600 8N1 |
+| Touch | Microchip CAP1166 / CAP1133 / CAP1203 | I2C | `0x2B` / `0x28` / `0x28` |
+
+On rev-C the I2C bus runs at 400 kHz on SDA IO7 / SCL IO6, and the LP UART
+uses TX IO5 / RX IO4. The SGP41 is compensated with the SHT40's temperature and
+humidity.
+
+There is one particulate slot and one CO2 slot, and the firmware picks the
+module at boot:
+
+- **Particulates**: the SPS30 is tried first. If it doesn't answer, the firmware
+  waits up to 2.5 s for a PMS5003 frame. Allow about 30 s after power-up for
+  PMS5003 readings to settle.
+- **CO2**: the S12 is tried first, because it identifies itself exactly. The S88
+  is accepted as the fallback for any module that answers at `0xFE`.
+
+The touch controller is chosen at build time with `TOUCH_IC` and is not
+detected.
 
 ## Build options
 
